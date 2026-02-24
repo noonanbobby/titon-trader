@@ -47,8 +47,8 @@ class IBKRSettings(BaseSettings):
         description="IB Gateway hostname (Docker service name or IP)",
     )
     gateway_port: int = Field(
-        default=4004,
-        description="IB Gateway API port (gnzsnz/ib-gateway paper default)",
+        default=4002,
+        description="IB Gateway API port (4001=live, 4002=paper)",
     )
     client_id: int = Field(
         default=1,
