@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# ML models (large binaries)
+models/*.pkl
+models/*.joblib
+models/*.pt
+models/*.onnx
+
+# Data files
+data/*.csv
+data/*.parquet
+data/*.h5
+
+# Logs
+logs/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml
+
+# Node (MCP servers)
+node_modules/
+
+# Claude local config
+.claude/settings.local.json
+.claude/memory.jsonl

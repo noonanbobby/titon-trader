@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# ML models and data (large binary files)
+models/*.pkl
+models/*.joblib
+models/*.pt
+models/*.onnx
+data/*.csv
+data/*.parquet
+data/*.h5
+
+# Logs
+logs/
+
+# Node modules (MCP servers)
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+postgres-data/
+redis-data/
+questdb-data/
+
+# Coverage
+htmlcov/
+.coverage
+coverage.xml

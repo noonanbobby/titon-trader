@@ -1,0 +1,239 @@
+# =============================================================================
+# Project Titan — Strategy Configuration
+# =============================================================================
+# Every options strategy the system can trade is defined here.  The strategy
+# selector reads this file at startup and uses the parameters to filter,
+# score, and size candidate trades.
+#
+# Key fields:
+#   enabled        – Master switch.  Set to false to prevent the strategy from
+#                    being selected regardless of market conditions.
+#   regimes        – List of market regimes where this strategy is eligible.
+#                    Values: low_vol_trend, high_vol_trend, range_bound, crisis
+#   min_iv_rank    – Minimum IV Rank (0–100) required for entry.
+#   max_iv_rank    – Maximum IV Rank (0–100) allowed for entry.
+#   target_dte     – Ideal days-to-expiration for the primary legs.
+#   dte_range      – Acceptable DTE window [min, max] around the target.
+#   delta_range    – Acceptable delta range for the primary short/long leg.
+#   profit_target_pct – Close the position when this % of max profit is reached.
+#   stop_loss_pct  – Close the position when unrealized loss hits this % of max loss.
+#   max_positions  – Maximum simultaneous positions for this strategy type.
+# =============================================================================
+
+strategies:
+
+  # ── Bullish Vertical Spreads ───────────────────────────────────────────
+
+  bull_call_spread:
+    enabled: true
+    description: "Buy lower-strike call, sell higher-strike call — net debit bullish play"
+    regimes:
+      - low_vol_trend
+      - high_vol_trend
+    min_iv_rank: 0
+    max_iv_rank: 50
+    target_dte: 45
+    dte_range: [30, 60]
+    delta_range:
+      long_leg: [0.55, 0.70]
+      short_leg: [0.30, 0.45]
+    wing_width: 5          # strike distance in dollars (adjusted per ticker price)
+    profit_target_pct: 0.50
+    stop_loss_pct: 1.00    # risk full debit
+    max_positions: 3
+
+  bull_put_spread:
+    enabled: true
+    description: "Sell higher-strike put, buy lower-strike put — net credit bullish play"
+    regimes:
+      - low_vol_trend
+      - range_bound
+    min_iv_rank: 30
+    max_iv_rank: 100
+    target_dte: 45
+    dte_range: [30, 60]
+    delta_range:
+      short_leg: [-0.35, -0.20]
+      long_leg: [-0.15, -0.05]
+    wing_width: 5
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.00    # 2x credit received
+    max_positions: 3
+
+  # ── Neutral / Range-Bound Strategies ───────────────────────────────────
+
+  iron_condor:
+    enabled: true
+    description: "Sell OTM put spread + sell OTM call spread — neutral premium collection"
+    regimes:
+      - low_vol_trend
+      - range_bound
+    min_iv_rank: 25
+    max_iv_rank: 75
+    target_dte: 45
+    dte_range: [30, 60]
+    delta_range:
+      short_put: [-0.20, -0.10]
+      long_put: [-0.08, -0.02]
+      short_call: [0.10, 0.20]
+      long_call: [0.02, 0.08]
+    wing_width: 5
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.00
+    max_positions: 2
+
+  short_strangle:
+    enabled: true
+    description: "Sell OTM put + sell OTM call — undefined-risk neutral premium play"
+    regimes:
+      - low_vol_trend
+      - range_bound
+    min_iv_rank: 40
+    max_iv_rank: 100
+    target_dte: 45
+    dte_range: [30, 60]
+    delta_range:
+      short_put: [-0.20, -0.12]
+      short_call: [0.12, 0.20]
+    profit_target_pct: 0.50
+    stop_loss_pct: 2.00
+    max_positions: 2
+    margin_required: true  # requires portfolio margin or sufficient buying power
+
+  # ── Calendar / Diagonal Strategies ─────────────────────────────────────
+
+  calendar_spread:
+    enabled: true
+    description: "Sell near-term option, buy same-strike longer-term option — vol and time play"
+    regimes:
+      - range_bound
+      - low_vol_trend
+    min_iv_rank: 10
+    max_iv_rank: 50
+    target_dte:
+      front_month: 30
+      back_month: 60
+    dte_range:
+      front_month: [21, 45]
+      back_month: [45, 90]
+    delta_range:
+      strike: [0.45, 0.55]   # ATM preferred
+    profit_target_pct: 0.25
+    stop_loss_pct: 0.50
+    max_positions: 2
+
+  diagonal_spread:
+    enabled: true
+    description: "Sell near-term OTM option, buy longer-term ITM/ATM option — directional calendar"
+    regimes:
+      - low_vol_trend
+      - high_vol_trend
+    min_iv_rank: 10
+    max_iv_rank: 60
+    target_dte:
+      front_month: 30
+      back_month: 60
+    dte_range:
+      front_month: [21, 45]
+      back_month: [45, 90]
+    delta_range:
+      long_leg: [0.60, 0.75]
+      short_leg: [0.25, 0.40]
+    profit_target_pct: 0.25
+    stop_loss_pct: 0.50
+    max_positions: 2
+
+  # ── Volatility / Butterfly Strategies ──────────────────────────────────
+
+  broken_wing_butterfly:
+    enabled: true
+    description: "Asymmetric butterfly with skip-strike wing — credit or even money entry"
+    regimes:
+      - range_bound
+      - low_vol_trend
+    min_iv_rank: 30
+    max_iv_rank: 80
+    target_dte: 45
+    dte_range: [30, 60]
+    delta_range:
+      body_strike: [-0.35, -0.25]   # short strikes (2x)
+      upper_wing: [-0.10, -0.05]    # long protective wing
+      lower_wing: [-0.50, -0.40]    # long closer wing (narrower side)
+    wing_widths:
+      narrow: 5
+      wide: 10
+    profit_target_pct: 0.50
+    stop_loss_pct: 1.50
+    max_positions: 2
+
+  long_straddle:
+    enabled: true
+    description: "Buy ATM call + buy ATM put — long volatility play before catalysts"
+    regimes:
+      - high_vol_trend
+      - crisis
+    min_iv_rank: 0
+    max_iv_rank: 30     # only buy when vol is cheap
+    target_dte: 30
+    dte_range: [21, 45]
+    delta_range:
+      call: [0.48, 0.52]
+      put: [-0.52, -0.48]
+    profit_target_pct: 0.50
+    stop_loss_pct: 0.30    # tight stop — debit play
+    max_positions: 1
+    catalyst_required: true  # only enter ahead of known catalysts
+
+  # ── Advanced / Synthetic Strategies ────────────────────────────────────
+
+  pmcc:
+    enabled: true
+    description: "Poor Man's Covered Call — buy deep ITM LEAPS call, sell OTM near-term call"
+    regimes:
+      - low_vol_trend
+      - high_vol_trend
+    min_iv_rank: 0
+    max_iv_rank: 50
+    target_dte:
+      leaps: 365
+      short_call: 30
+    dte_range:
+      leaps: [270, 540]
+      short_call: [21, 45]
+    delta_range:
+      leaps: [0.75, 0.85]
+      short_call: [0.25, 0.35]
+    profit_target_pct: 0.30   # per short call cycle
+    stop_loss_pct: 0.20       # relative to LEAPS cost
+    max_positions: 2
+    roll_short_at_dte: 7      # roll the short call when DTE drops below this
+
+  ratio_spread:
+    enabled: true
+    description: "Buy N calls/puts, sell M calls/puts (M > N) — partially financed directional bet"
+    regimes:
+      - high_vol_trend
+      - range_bound
+    min_iv_rank: 40
+    max_iv_rank: 100
+    target_dte: 45
+    dte_range: [30, 60]
+    delta_range:
+      long_leg: [0.55, 0.65]
+      short_leg: [0.25, 0.35]
+    ratio: "1:2"              # buy 1, sell 2
+    profit_target_pct: 0.50
+    stop_loss_pct: 1.50
+    max_positions: 1
+    margin_required: true
+
+# =============================================================================
+# Global Strategy Defaults
+# =============================================================================
+defaults:
+  min_open_interest: 500          # minimum OI per leg for liquidity
+  max_bid_ask_spread_pct: 0.05    # max bid-ask spread as % of mid price
+  use_monthly_expirations: true   # prefer monthlies over weeklies
+  close_before_expiry_dte: 5      # close all positions with DTE <= this
+  min_underlying_price: 20.0      # skip tickers priced below this
+  max_underlying_price: 5000.0    # skip tickers priced above this

@@ -1,0 +1,41 @@
+version: '3.8'
+
+# Development overrides — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+services:
+  titan:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./src:/app/src
+      - ./config:/app/config
+      - ./models:/app/models
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+    environment:
+      - IBKR_TRADING_MODE=paper
+      - LOG_LEVEL=DEBUG
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: "no"
+
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  questdb:
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:8812:8812"
+      - "127.0.0.1:9009:9009"
+
+  grafana:
+    ports:
+      - "127.0.0.1:3000:3000"

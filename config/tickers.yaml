@@ -1,0 +1,109 @@
+# =============================================================================
+# Project Titan — Ticker Universe
+# =============================================================================
+# Liquid underlying securities suitable for options trading.  Organized by
+# sector for portfolio-level exposure tracking and sector concentration
+# limits enforced by the risk manager.
+#
+# Selection criteria:
+#   - Average daily options volume > 10,000 contracts
+#   - Tight bid-ask spreads on ATM options (< 5% of mid)
+#   - Weekly and monthly expirations available
+#   - Sufficient strike granularity ($1–$5 intervals near ATM)
+# =============================================================================
+
+# ── Index ETFs ───────────────────────────────────────────────────────────────
+index_etfs:
+  description: "Broad market and index-tracking ETFs"
+  tickers:
+    - SPY    # S&P 500
+    - QQQ    # Nasdaq-100
+    - IWM    # Russell 2000
+    - DIA    # Dow Jones Industrial Average
+
+# ── Sector ETFs ──────────────────────────────────────────────────────────────
+sector_etfs:
+  description: "Sector-specific ETFs for hedging and relative value"
+  tickers:
+    - XLF    # Financials
+    - XLE    # Energy
+    - XLK    # Technology
+    - XLV    # Healthcare
+    - GDX    # Gold Miners
+
+# ── Technology ───────────────────────────────────────────────────────────────
+technology:
+  description: "Large-cap technology companies with deep options liquidity"
+  tickers:
+    - AAPL   # Apple
+    - MSFT   # Microsoft
+    - GOOGL  # Alphabet
+    - AMZN   # Amazon
+    - META   # Meta Platforms
+    - NVDA   # NVIDIA
+    - AMD    # Advanced Micro Devices
+    - TSM    # Taiwan Semiconductor
+    - CRM    # Salesforce
+    - ORCL   # Oracle
+
+# ── Consumer / Retail ────────────────────────────────────────────────────────
+consumer:
+  description: "Consumer discretionary and staples with strong options flow"
+  tickers:
+    - TSLA   # Tesla
+    - NFLX   # Netflix
+    - SBUX   # Starbucks
+    - NKE    # Nike
+    - COST   # Costco
+
+# ── Financials ───────────────────────────────────────────────────────────────
+financials:
+  description: "Major banks and financial services"
+  tickers:
+    - JPM    # JPMorgan Chase
+    - GS     # Goldman Sachs
+    - BAC    # Bank of America
+    - V      # Visa
+
+# ── Healthcare / Biotech ────────────────────────────────────────────────────
+healthcare:
+  description: "Healthcare and biotech with catalyst-driven options activity"
+  tickers:
+    - UNH    # UnitedHealth Group
+    - JNJ    # Johnson & Johnson
+    - ABBV   # AbbVie
+    - MRK    # Merck
+
+# ── Energy / Commodities ────────────────────────────────────────────────────
+energy:
+  description: "Energy producers and commodity-linked equities"
+  tickers:
+    - XOM    # Exxon Mobil
+    - CVX    # Chevron
+
+# ── Industrials / Aerospace ─────────────────────────────────────────────────
+industrials:
+  description: "Industrial and defense companies"
+  tickers:
+    - BA     # Boeing
+    - CAT    # Caterpillar
+
+# ── Volatility ──────────────────────────────────────────────────────────────
+volatility:
+  description: "VIX-related products for hedging and volatility trades"
+  tickers:
+    - VIX    # CBOE Volatility Index (reference only — no direct options)
+    - UVXY   # ProShares Ultra VIX Short-Term Futures
+
+# =============================================================================
+# Universe Metadata
+# =============================================================================
+metadata:
+  total_tickers: 40
+  last_reviewed: "2026-02-23"
+  review_frequency: "quarterly"
+  notes: >
+    This universe is reviewed quarterly.  Tickers are added or removed based
+    on sustained options liquidity, bid-ask spread quality, and relevance to
+    the strategies defined in strategies.yaml.  Avoid adding tickers with
+    average daily options volume below 10,000 contracts.

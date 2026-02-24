@@ -1,0 +1,175 @@
+# =============================================================================
+# Project Titan — Risk Management Parameters
+# =============================================================================
+# This file defines every risk limit enforced by the risk manager and circuit
+# breaker subsystems.  The values here are loaded at startup and checked on
+# every pre-trade evaluation, position monitoring tick, and P&L update.
+#
+# THESE LIMITS ARE SACRED.  They are never overridden by agent decisions,
+# ML confidence scores, or manual intervention during live trading.
+# =============================================================================
+
+# ── Circuit Breaker Thresholds ───────────────────────────────────────────────
+# Drawdown levels measured against the session high-water mark.
+# Each level triggers increasingly restrictive responses.
+circuit_breakers:
+  levels:
+    - name: NORMAL
+      drawdown_pct: 0.00
+      action: "full_trading"
+      description: "Normal operations — all strategies enabled"
+
+    - name: CAUTION
+      drawdown_pct: 0.02
+      action: "reduce_size"
+      size_multiplier: 0.50
+      description: >
+        2% drawdown — reduce new position sizes to 50% of normal.
+        Existing positions are not affected.
+
+    - name: WARNING
+      drawdown_pct: 0.05
+      action: "restrict_strategies"
+      size_multiplier: 0.25
+      allowed_strategies:
+        - bull_put_spread
+        - iron_condor
+      description: >
+        5% drawdown — only high-probability credit strategies allowed.
+        New position sizes reduced to 25% of normal.
+
+    - name: HALT
+      drawdown_pct: 0.10
+      action: "halt_new_trades"
+      description: >
+        10% drawdown — no new trades permitted.  Existing positions
+        continue to be monitored for exits.
+
+    - name: EMERGENCY
+      drawdown_pct: 0.15
+      action: "close_all_positions"
+      description: >
+        15% drawdown — close all open positions at market.
+        Trading is suspended until manual review and reset.
+
+  # Time-based P&L limits (independent of drawdown percentage)
+  daily_loss_limit: -3000.0       # dollars — halt if daily P&L drops below
+  weekly_loss_limit: -7500.0      # dollars — halt if weekly P&L drops below
+  monthly_loss_limit: -15000.0    # dollars — halt if monthly P&L drops below
+
+# ── Recovery Ladder ──────────────────────────────────────────────────────────
+# After a circuit breaker triggers, the system must earn its way back to
+# full capacity through a graduated recovery process.
+recovery:
+  stages:
+    - stage: 1
+      size_pct: 0.50
+      description: "50% position sizing — first recovery stage"
+      advance_criteria:
+        consecutive_winners: 3
+        min_profit: 500.0         # dollars — cumulative profit in this stage
+
+    - stage: 2
+      size_pct: 0.75
+      description: "75% position sizing — second recovery stage"
+      advance_criteria:
+        consecutive_winners: 3
+        min_profit: 750.0
+
+    - stage: 3
+      size_pct: 1.00
+      description: "Full position sizing restored"
+      advance_criteria: null      # final stage — no further advancement
+
+  # If a trade loses during recovery, reset to stage 1
+  reset_on_loss: true
+  # Minimum calendar days between circuit breaker reset and full resumption
+  min_recovery_days: 5
+
+# ── Position Limits ──────────────────────────────────────────────────────────
+position_limits:
+  max_concurrent_positions: 8
+  max_positions_per_ticker: 2
+  max_positions_per_strategy: 3
+  max_positions_per_sector: 3
+  max_notional_per_ticker_pct: 0.20   # 20% of account in any single ticker
+  max_notional_per_sector_pct: 0.35   # 35% of account in any single sector
+  max_total_risk_pct: 0.10            # 10% of account at risk across all positions
+
+# ── Per-Trade Risk Limits ────────────────────────────────────────────────────
+per_trade:
+  max_risk_pct: 0.02              # 2% of account equity per trade
+  max_risk_dollars: 3000.0        # absolute dollar cap per trade
+  min_reward_risk_ratio: 1.0      # minimum reward-to-risk ratio
+  max_bid_ask_spread_pct: 0.05    # reject trades with spreads > 5% of mid
+  min_open_interest: 500          # minimum OI per leg
+  min_daily_volume: 100           # minimum daily volume per leg
+
+# ── Portfolio Greeks Limits ──────────────────────────────────────────────────
+# Aggregate Greek exposures across all open positions.
+greeks_limits:
+  max_portfolio_delta: 500        # net delta exposure (positive or negative)
+  max_portfolio_gamma: 200        # absolute gamma exposure
+  max_portfolio_theta: -500       # max negative theta (daily decay cost)
+  max_portfolio_vega: 1000        # absolute vega exposure
+  delta_hedge_threshold: 300      # trigger delta hedge when net delta exceeds this
+
+# ── Correlation Limits ───────────────────────────────────────────────────────
+correlation:
+  max_pairwise_correlation: 0.80  # reject new trade if correlation with existing > this
+  rolling_window_days: 60         # lookback for rolling correlation
+  correlation_check_enabled: true
+
+# ── Event Exclusion Windows ──────────────────────────────────────────────────
+# Block new entries near high-impact events.
+event_exclusions:
+  earnings:
+    days_before: 3                # no new entries 3 days before earnings
+    days_after: 1                 # no new entries 1 day after earnings
+    close_before: true            # close existing positions before earnings
+    close_before_days: 1          # close 1 day before earnings
+
+  fomc:
+    days_before: 1
+    days_after: 1
+    reduce_size: true             # reduce position sizes to 50% around FOMC
+    size_multiplier: 0.50
+
+  cpi:
+    days_before: 1
+    days_after: 0
+
+  nfp:
+    days_before: 1
+    days_after: 0
+
+  opex:
+    days_before: 1                # options expiration week caution
+    days_after: 0
+    reduce_size: true
+    size_multiplier: 0.75
+
+# ── Slippage and Execution ──────────────────────────────────────────────────
+execution:
+  assumed_slippage_pct: 0.15      # 15% of bid-ask spread as slippage assumption
+  max_order_attempts: 3           # retry failed orders up to 3 times
+  order_timeout_seconds: 60       # cancel unfilled orders after 60 seconds
+  order_efficiency_ratio_max: 20  # IBKR limit: submitted / filled < 20:1
+  min_seconds_between_orders: 3   # throttle order submission
+  use_limit_orders_only: true     # never use market orders for spreads
+
+# ── Tail Risk Monitoring ────────────────────────────────────────────────────
+tail_risk:
+  vix_danger_level: 30            # elevated caution above VIX 30
+  vix_crisis_level: 40            # crisis mode above VIX 40
+  skew_danger_level: 140          # CBOE SKEW index warning
+  vvix_danger_level: 120          # VVIX warning level
+  composite_tail_score_halt: 0.80 # halt new trades when composite > 0.80
+
+  # Composite tail risk score weights
+  weights:
+    vix_component: 0.30
+    skew_component: 0.25
+    vvix_component: 0.20
+    put_call_ratio_component: 0.15
+    credit_spread_component: 0.10
