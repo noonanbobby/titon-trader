@@ -345,6 +345,12 @@ class RegimeDetector:
         regime: str = self._state_regime_map.get(predicted_state, REGIME_RANGE_BOUND)
         confidence: float = self.calculate_regime_confidence(latest_probs)
 
+        # Crisis override: VIX > 35 ALWAYS triggers crisis regardless of HMM
+        current_vix = float(features.iloc[-1]["vix"])
+        if current_vix > VIX_CRISIS_THRESHOLD:
+            regime = REGIME_CRISIS
+            confidence = max(confidence, 0.95)
+
         # Build state probability dict keyed by regime name
         prob_by_regime: dict[str, float] = {}
         for state_idx in range(self._n_states):

@@ -9,7 +9,7 @@ Usage::
 
     from src.ai.journal_agent import JournalAgent
 
-    agent = JournalAgent(api_key="sk-ant-...", model="claude-sonnet-4-5-20250929")
+    agent = JournalAgent(api_key="sk-ant-...", model="claude-sonnet-4-6")
     entry = await agent.review_trades(closed_trades)
     print(entry.summary.total_pnl)
 """

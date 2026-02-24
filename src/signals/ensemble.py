@@ -46,12 +46,13 @@ if TYPE_CHECKING:
 # Default signal stream weights used when no trained model is available.
 # These encode prior beliefs about each stream's predictive value.
 DEFAULT_WEIGHTS: dict[str, float] = {
-    "technical": 0.25,
-    "regime": 0.20,
+    "technical": 0.22,
+    "regime": 0.18,
     "flow": 0.15,
-    "vrp": 0.15,
-    "sentiment": 0.10,
-    "cross_asset": 0.10,
+    "vrp": 0.13,
+    "insider": 0.10,
+    "sentiment": 0.08,
+    "cross_asset": 0.09,
     "gex": 0.05,
 }
 
@@ -406,7 +407,7 @@ class EnsembleSignalGenerator:
         gex_norm = signals.gex_net_gex / 1_000_000_000.0
         features[33] = float(np.clip(gex_norm, -1.0, 1.0))
         # Binary: 1 if positive GEX regime, 0 otherwise.
-        features[34] = 1.0 if signals.gex_regime.lower() == "positive" else 0.0
+        features[34] = 1.0 if signals.gex_regime.lower() == "positive_gamma" else 0.0
 
         # -- Insider features (indices 35..38) -----------------------------
         features[35] = signals.insider_score
@@ -421,8 +422,9 @@ class EnsembleSignalGenerator:
         # Scale IV Rank and IV Percentile from 0--100 to 0--1.
         features[39] = signals.vrp_iv_rank / 100.0
         features[40] = signals.vrp_iv_percentile / 100.0
-        # VRP spread: clip to [-1, 1] (typical range for vol difference).
-        features[41] = float(np.clip(signals.vrp_spread, -1.0, 1.0))
+        # VRP spread is in vol points (e.g. -10 to +30).  Normalize by
+        # dividing by 30 and clipping to [-1, 1].
+        features[41] = float(np.clip(signals.vrp_spread / 30.0, -1.0, 1.0))
         # HV/IV ratio: clip to [0, 3] and scale to [0, 1].
         features[42] = float(np.clip(signals.vrp_hv_iv_ratio / 3.0, 0.0, 1.0))
         features[43] = signals.vrp_score
@@ -736,6 +738,7 @@ class EnsembleSignalGenerator:
         sentiment_val = (float(features[20]) + 1.0) / 2.0  # [-1,1] -> [0,1]
         flow_val = (float(features[23]) + 1.0) / 2.0  # [-1,1] -> [0,1]
         regime_val = float(features[31])  # Already 0..1
+        insider_val = (float(features[35]) + 1.0) / 2.0  # [-1,1] -> [0,1]
         vrp_val = float(features[43])  # Already 0..1
         cross_asset_val = (float(features[44]) + 1.0) / 2.0  # [-1,1] -> [0,1]
         gex_val = (float(features[32]) + 1.0) / 2.0  # [-1,1] -> [0,1]
@@ -745,6 +748,7 @@ class EnsembleSignalGenerator:
             + DEFAULT_WEIGHTS["sentiment"] * sentiment_val
             + DEFAULT_WEIGHTS["flow"] * flow_val
             + DEFAULT_WEIGHTS["regime"] * regime_val
+            + DEFAULT_WEIGHTS["insider"] * insider_val
             + DEFAULT_WEIGHTS["vrp"] * vrp_val
             + DEFAULT_WEIGHTS["cross_asset"] * cross_asset_val
             + DEFAULT_WEIGHTS["gex"] * gex_val

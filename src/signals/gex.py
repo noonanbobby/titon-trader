@@ -717,3 +717,73 @@ class GammaExposureCalculator:
         )
 
         return signal
+
+    def calculate_volatility_trigger(
+        self,
+        gex_by_strike: dict[float, float],
+        spot_price: float,
+    ) -> float | None:
+        """Calculate the Volatility Trigger level using linear interpolation.
+
+        The Volatility Trigger is the price at which dealer gamma exposure
+        flips from positive (supportive, mean-reverting hedging) to negative
+        (destabilising, trend-following hedging).  It is found by identifying
+        the pair of adjacent strikes where net GEX transitions from positive
+        to negative and interpolating the exact crossing point.
+
+        Linear interpolation formula::
+
+            vol_trigger = strike_pos + (strike_neg - strike_pos)
+                          * gex_pos / (gex_pos - gex_neg)
+
+        where ``strike_pos`` is the strike with positive GEX and
+        ``strike_neg`` is the adjacent strike with non-positive GEX.
+
+        When the spot price is above the volatility trigger, dealers are
+        net long gamma and the market tends toward mean-reversion (range-
+        bound).  When below, dealers are net short gamma and the market
+        tends toward momentum (directional breakouts).
+
+        Args:
+            gex_by_strike: Mapping of strike price to net GEX (USD notional).
+            spot_price: Current underlying spot price.
+
+        Returns:
+            The interpolated volatility trigger price level, or ``None``
+            if no positive-to-negative GEX transition is found.
+        """
+        if not gex_by_strike:
+            return None
+
+        sorted_strikes = sorted(gex_by_strike.keys())
+        best_trigger: float | None = None
+        min_distance: float = float("inf")
+
+        for i in range(len(sorted_strikes) - 1):
+            strike_a = sorted_strikes[i]
+            strike_b = sorted_strikes[i + 1]
+            gex_a = gex_by_strike[strike_a]
+            gex_b = gex_by_strike[strike_b]
+
+            # Look for positive → non-positive transition
+            if gex_a > 0 and gex_b <= 0:
+                denominator = gex_a - gex_b
+                if abs(denominator) < 1e-12:
+                    trigger = (strike_a + strike_b) / 2.0
+                else:
+                    trigger = strike_a + (strike_b - strike_a) * (gex_a / denominator)
+
+                dist = abs(trigger - spot_price)
+                if dist < min_distance:
+                    min_distance = dist
+                    best_trigger = trigger
+
+        if best_trigger is not None:
+            self._log.debug(
+                "volatility_trigger_calculated",
+                vol_trigger=round(best_trigger, 2),
+                spot_price=spot_price,
+                distance=round(min_distance, 2),
+            )
+
+        return best_trigger

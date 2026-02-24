@@ -20,7 +20,7 @@ Usage::
     from src.strategies.base import StrategyConfig
 
     config = StrategyConfig(...)
-    strategy = BrokenWingButterfly(config)
+    strategy = BrokenWingButterfly("broken_wing_butterfly", config)
     signal = await strategy.check_entry("AAPL", 175.0, 45.0, "range_bound",
                                          greeks, options_chain)
 """
@@ -50,30 +50,36 @@ logger = get_logger("strategy.broken_wing_butterfly")
 # Configuration constants
 # ---------------------------------------------------------------------------
 
-# Target DTE
-TARGET_DTE: int = 45
-MIN_DTE: int = 30
-MAX_DTE: int = 60
+# Target DTE — Carl Allen methodology: 21 DTE for optimal theta decay
+TARGET_DTE: int = 21
+MIN_DTE: int = 14
+MAX_DTE: int = 28
 
-# Body (2x short puts) delta range
-BODY_DELTA_MIN: float = -0.35
-BODY_DELTA_MAX: float = -0.25
+# Body (2x short puts) delta range — Carl Allen: target 28Δ
+BODY_DELTA_MIN: float = -0.32
+BODY_DELTA_MAX: float = -0.24
 
-# Upper wing (1x long put, further OTM — wide side) delta range
-UPPER_WING_DELTA_MIN: float = -0.10
-UPPER_WING_DELTA_MAX: float = -0.05
+# Upper wing (1x long put, further OTM — wide side) delta range — Carl Allen: 20Δ
+UPPER_WING_DELTA_MIN: float = -0.24
+UPPER_WING_DELTA_MAX: float = -0.16
 
-# Lower wing (1x long put, closer to ATM — narrow side) delta range
-LOWER_WING_DELTA_MIN: float = -0.50
-LOWER_WING_DELTA_MAX: float = -0.40
+# Lower wing (1x long put, closer to ATM — narrow side) delta range — Carl Allen: 32Δ
+LOWER_WING_DELTA_MIN: float = -0.36
+LOWER_WING_DELTA_MAX: float = -0.28
 
 # Default wing widths in dollars
 NARROW_WING_WIDTH: float = 5.0
 WIDE_WING_WIDTH: float = 10.0
 
-# Exit thresholds
-PROFIT_TARGET_PCT: float = 0.50
+# Credit target: 10–15% of narrow wing width (Carl Allen methodology)
+MIN_CREDIT_PCT: float = 0.10
+MAX_CREDIT_PCT: float = 0.15
+
+# Exit thresholds — Carl Allen: exit at 2% of narrow wing width profit
+# or at 7 DTE, whichever comes first
+PROFIT_TARGET_PCT: float = 0.02  # 2% of narrow wing width
 STOP_LOSS_MULTIPLIER: float = 1.50
+EXIT_DTE_THRESHOLD: int = 7
 
 # Default to puts for the BWB
 DEFAULT_RIGHT: str = "P"
@@ -118,18 +124,8 @@ class BrokenWingButterfly(BaseStrategy):
         - Exit if underlying breaks through the wide wing.
     """
 
-    def __init__(self, config: StrategyConfig) -> None:
-        super().__init__(config)
-        self._log = get_logger(f"strategy.{self.name}")
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def name(self) -> str:
-        """Return the canonical strategy name."""
-        return "broken_wing_butterfly"
+    def __init__(self, name: str, config: StrategyConfig) -> None:
+        super().__init__(name, config)
 
     # ------------------------------------------------------------------
     # Entry
@@ -587,6 +583,77 @@ class BrokenWingButterfly(BaseStrategy):
         max_loss = (wide_width - narrow_width - net_credit_per_share) * 100.0
         # Max loss cannot be negative (would mean risk-free trade)
         return round(max(max_loss, 0.0), 2)
+
+    # ------------------------------------------------------------------
+    # Order construction & Greeks
+    # ------------------------------------------------------------------
+
+    async def construct_order(
+        self,
+        signal: TradeSignal,
+        contract_factory: Any,
+    ) -> Any:
+        """Build an IBKR combo order from the trade signal legs.
+
+        Args:
+            signal: The approved trade signal with leg specifications.
+            contract_factory: A :class:`ContractFactory` instance for building
+                IBKR combo contracts.
+
+        Returns:
+            An IBKR ``Contract`` object representing the multi-leg spread.
+        """
+        legs_for_broker: list[dict[str, Any]] = []
+        for leg in signal.legs:
+            expiry = leg.expiry
+            if hasattr(expiry, "strftime"):
+                expiry = expiry.strftime("%Y%m%d")
+            legs_for_broker.append(
+                {
+                    "action": leg.action,
+                    "expiry": expiry,
+                    "strike": leg.strike,
+                    "right": leg.right,
+                    "ratio": leg.quantity,
+                }
+            )
+        return await contract_factory.build_spread(
+            ticker=signal.ticker,
+            legs=legs_for_broker,
+        )
+
+    def calculate_greeks(
+        self,
+        legs: list[LegSpec],
+        greeks: dict[str, float],
+    ) -> dict[str, float]:
+        """Aggregate Greeks across all legs of the spread.
+
+        Args:
+            legs: The constructed leg specifications.
+            greeks: Per-leg Greeks keyed by ``strike_right`` identifier.
+
+        Returns:
+            Dictionary with aggregated delta, gamma, theta, vega.
+        """
+        total_delta = 0.0
+        total_gamma = 0.0
+        total_theta = 0.0
+        total_vega = 0.0
+        for leg in legs:
+            multiplier = leg.quantity if leg.action == "BUY" else -leg.quantity
+            key = f"{leg.strike}_{leg.right}"
+            leg_greeks = greeks.get(key, {})
+            total_delta += multiplier * float(leg_greeks.get("delta", 0.0))
+            total_gamma += multiplier * float(leg_greeks.get("gamma", 0.0))
+            total_theta += multiplier * float(leg_greeks.get("theta", 0.0))
+            total_vega += multiplier * float(leg_greeks.get("vega", 0.0))
+        return {
+            "delta": round(total_delta, 6),
+            "gamma": round(total_gamma, 6),
+            "theta": round(total_theta, 6),
+            "vega": round(total_vega, 6),
+        }
 
     # ------------------------------------------------------------------
     # Private helpers

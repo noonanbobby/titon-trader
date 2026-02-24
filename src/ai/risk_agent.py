@@ -69,8 +69,8 @@ PRICE_OUTPUT_PER_M: float = 15.0
 PRICE_THINKING_PER_M: float = 15.0
 
 # Default limits
-DEFAULT_MODEL: str = "claude-sonnet-4-5-20250929"
-DEFAULT_THINKING_BUDGET: int = 4096
+DEFAULT_MODEL: str = "claude-sonnet-4-6"
+DEFAULT_THINKING_BUDGET: int = 8192
 DEFAULT_MAX_TOKENS: int = 4096
 BATCH_DELAY_SECONDS: float = 1.0
 
@@ -867,9 +867,11 @@ class RiskAgent:
             hard_checks_passed.append("max_concurrent_positions")
 
         # -- Check 4: Portfolio delta --
-        portfolio_delta = abs(context.portfolio_greeks.get("delta", 0.0))
-        proposal_delta = abs(float(proposal.get("expected_delta", 0.0)))
-        projected_delta = portfolio_delta + proposal_delta
+        # Use algebraic sum (not absolute) so hedging trades that reduce
+        # net delta are not incorrectly rejected.
+        portfolio_delta = float(context.portfolio_greeks.get("delta", 0.0))
+        proposal_delta = float(proposal.get("expected_delta", 0.0))
+        projected_delta = abs(portfolio_delta + proposal_delta)
         if projected_delta > HARD_MAX_PORTFOLIO_DELTA:
             hard_checks_failed.append("portfolio_delta")
             rejection_reasons.append(

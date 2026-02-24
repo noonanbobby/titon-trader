@@ -22,6 +22,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # Install Python dependencies using uv
+# Note: torch pulls the full CUDA-capable wheel (~915MB) from PyPI.
+# The CPU-only index (download.pytorch.org/whl/cpu) conflicts with the
+# frozen lock file, so we use standard PyPI to ensure all packages resolve.
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy application source code

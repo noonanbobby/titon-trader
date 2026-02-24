@@ -738,6 +738,83 @@ class TechnicalSignalGenerator:
             _rs_hurst, raw=True
         )
 
+    # ------------------------------------------------------------------
+    # IV Rank & IV Percentile
+    # ------------------------------------------------------------------
+
+    def calculate_iv_rank(
+        self,
+        current_iv: float,
+        iv_high_52w: float,
+        iv_low_52w: float,
+    ) -> float:
+        """Calculate IV Rank from the 52-week high and low implied volatility.
+
+        IV Rank measures where the current IV sits within its 52-week
+        range, expressed as a percentage from 0 to 100.
+
+        Formula::
+
+            IV Rank = (Current_IV - 52wk_Low_IV) / (52wk_High_IV - 52wk_Low_IV) * 100
+
+        Args:
+            current_iv: Current implied volatility (annualised, e.g. 0.25 for 25%).
+            iv_high_52w: 52-week high implied volatility.
+            iv_low_52w: 52-week low implied volatility.
+
+        Returns:
+            IV Rank as a float between 0.0 and 100.0.  Returns 50.0 if the
+            52-week range is zero (no meaningful data).
+        """
+        iv_range = iv_high_52w - iv_low_52w
+        if iv_range <= 1e-10:
+            self._log.debug(
+                "iv_rank_zero_range",
+                current_iv=current_iv,
+                iv_high_52w=iv_high_52w,
+                iv_low_52w=iv_low_52w,
+            )
+            return 50.0
+
+        rank = ((current_iv - iv_low_52w) / iv_range) * 100.0
+        return max(0.0, min(100.0, round(rank, 2)))
+
+    def calculate_iv_percentile(
+        self,
+        current_iv: float,
+        historical_iv: pd.Series | np.ndarray,
+    ) -> float:
+        """Calculate IV Percentile from historical IV observations.
+
+        IV Percentile measures the percentage of days in the lookback
+        period where IV was *below* the current level.  A value of 80
+        means IV was lower than today's value on 80% of the observed days.
+
+        Args:
+            current_iv: Current implied volatility (annualised).
+            historical_iv: Array or Series of past daily IV observations
+                spanning at least one year for a meaningful percentile.
+
+        Returns:
+            IV Percentile as a float between 0.0 and 100.0.  Returns 50.0
+            if fewer than 2 historical observations are available.
+        """
+        if hasattr(historical_iv, "dropna"):
+            historical_iv = historical_iv.dropna()
+
+        arr = np.asarray(historical_iv, dtype=float)
+        if len(arr) < 2:
+            self._log.debug(
+                "iv_percentile_insufficient_data",
+                current_iv=current_iv,
+                observations=len(arr),
+            )
+            return 50.0
+
+        count_below = np.sum(arr < current_iv)
+        percentile = (count_below / len(arr)) * 100.0
+        return round(percentile, 2)
+
 
 # ---------------------------------------------------------------------------
 # Module-level helper functions

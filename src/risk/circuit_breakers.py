@@ -20,7 +20,8 @@ Usage::
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -110,6 +111,9 @@ class CircuitBreaker:
                 "allowed_strategies", None
             )
 
+        # Async lock to protect concurrent state modifications
+        self._lock = asyncio.Lock()
+
         # ── Mutable state (persisted to PostgreSQL) ──
         self.current_level: str = BreakerLevel.NORMAL
         self.high_water_mark: float = 0.0
@@ -146,6 +150,20 @@ class CircuitBreaker:
         Returns:
             The new circuit breaker level as a string (e.g. ``"NORMAL"``).
         """
+        async with self._lock:
+            return await self._update_pnl_unlocked(
+                realized_pnl,
+                unrealized_pnl,
+                net_liquidation,
+            )
+
+    async def _update_pnl_unlocked(
+        self,
+        realized_pnl: float,
+        unrealized_pnl: float,
+        net_liquidation: float,
+    ) -> str:
+        """Internal update_pnl logic — caller must hold ``self._lock``."""
         total_pnl = realized_pnl + unrealized_pnl
 
         # Update daily P&L tracking
@@ -225,12 +243,38 @@ class CircuitBreaker:
     def is_trading_allowed(self) -> tuple[bool, str, float]:
         """Check whether trading is currently permitted.
 
+        Enforces ``min_recovery_days`` — after a HALT or EMERGENCY trigger
+        the system stays locked for a minimum cooling-off period even if
+        the recovery ladder would otherwise allow trading.  The trigger
+        timestamp is persisted to PostgreSQL so it survives restarts.
+
         Returns:
             A tuple of ``(allowed, reason, size_multiplier)``.
             - ``allowed``: ``True`` if new trades may be opened.
             - ``reason``: Human-readable explanation of the current state.
             - ``size_multiplier``: Fraction of normal position sizing to use.
         """
+        # ── Min recovery days enforcement ──
+        # If a HALT or EMERGENCY breaker has fired, enforce a minimum
+        # cooling-off period before any trading can resume.
+        if (
+            self._last_triggered_at is not None
+            and self.current_level in (BreakerLevel.HALT, BreakerLevel.EMERGENCY)
+            and self._min_recovery_days > 0
+        ):
+            elapsed = datetime.now(UTC) - self._last_triggered_at
+            required = timedelta(days=self._min_recovery_days)
+            if elapsed < required:
+                remaining = required - elapsed
+                days_left = remaining.days + (1 if remaining.seconds > 0 else 0)
+                return (
+                    False,
+                    f"{self.current_level}: Min recovery period not met — "
+                    f"{days_left} day(s) remaining of "
+                    f"{self._min_recovery_days}-day cooling off",
+                    0.0,
+                )
+
         size_multiplier = self.get_size_multiplier()
 
         if self.current_level == BreakerLevel.NORMAL:
@@ -319,6 +363,15 @@ class CircuitBreaker:
             is_winner: ``True`` if the trade was profitable.
             pnl: Realized P&L of the trade in dollars.
         """
+        async with self._lock:
+            await self._record_trade_result_unlocked(is_winner, pnl)
+
+    async def _record_trade_result_unlocked(
+        self,
+        is_winner: bool,
+        pnl: float,
+    ) -> None:
+        """Internal record_trade_result logic — caller must hold ``self._lock``."""
         if is_winner:
             self.consecutive_winners += 1
             self._recovery_pnl_accumulated += pnl
@@ -389,7 +442,11 @@ class CircuitBreaker:
         unavailable, defaults are used.
         """
         if self._db_pool is None:
-            self._log.info("circuit_breaker_load_state_skipped", reason="no_db_pool")
+            self._log.warning(
+                "circuit_breaker_load_state_no_db",
+                reason="no_db_pool — defaulting to HALT for safety",
+            )
+            self.current_level = "HALT"
             return
 
         try:
@@ -406,7 +463,16 @@ class CircuitBreaker:
                 )
 
                 if row is not None:
-                    self.current_level = row["level"]
+                    loaded_level = row["level"]
+                    if loaded_level in {lv.value for lv in BreakerLevel}:
+                        self.current_level = loaded_level
+                    else:
+                        self._log.warning(
+                            "circuit_breaker_invalid_level_loaded",
+                            loaded_level=loaded_level,
+                            defaulting_to="HALT",
+                        )
+                        self.current_level = BreakerLevel.HALT
                     self._last_triggered_at = row["triggered_at"]
                     self.daily_pnl = float(row["daily_pnl"] or 0.0)
                     self.weekly_pnl = float(row["weekly_pnl"] or 0.0)
@@ -431,6 +497,14 @@ class CircuitBreaker:
                     )
         except Exception:
             self._log.exception("circuit_breaker_load_state_failed")
+            # SAFETY: If we cannot read persisted state, assume the worst.
+            # Defaulting to NORMAL after a restart with DB failure could
+            # allow trading through a circuit breaker that was active.
+            self.current_level = "HALT"
+            self._log.warning(
+                "circuit_breaker_defaulting_to_halt",
+                reason="database_unreachable_on_startup",
+            )
 
     # ------------------------------------------------------------------
     # Periodic reset helpers
@@ -509,10 +583,25 @@ class CircuitBreaker:
         """Check if the recovery ladder criteria are met to advance a stage.
 
         Examines consecutive winners and cumulative profit against the
-        current stage's advancement criteria.
+        current stage's advancement criteria.  Also enforces
+        ``min_recovery_days`` — recovery cannot advance until the
+        minimum cooling-off period has elapsed since the breaker fired.
         """
         if self.recovery_stage <= 0:
             return
+
+        # Enforce min_recovery_days before allowing any recovery advance
+        if self._last_triggered_at is not None and self._min_recovery_days > 0:
+            elapsed = datetime.now(UTC) - self._last_triggered_at
+            required = timedelta(days=self._min_recovery_days)
+            if elapsed < required:
+                self._log.info(
+                    "recovery_advance_blocked_min_days",
+                    elapsed_days=elapsed.days,
+                    required_days=self._min_recovery_days,
+                    stage=self.recovery_stage,
+                )
+                return
 
         current_stage_def: dict[str, Any] | None = None
         for stage_def in self._recovery_stages:

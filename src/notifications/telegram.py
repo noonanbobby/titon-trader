@@ -34,6 +34,8 @@ from telegram.ext import (
 from src.utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import structlog
     from telegram import Update
 
@@ -151,6 +153,10 @@ class TelegramNotifier:
         # Emergency kill flag.
         self._kill_flag: bool = False
 
+        # Kill callback — injected by the main application so /kill
+        # actually triggers TitanApplication.request_kill().
+        self._kill_callback: Callable[[], None] | None = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -172,6 +178,15 @@ class TelegramNotifier:
                 ``daily_pnl``, ``circuit_breaker_level``.
         """
         self._state_provider = provider
+
+    def set_kill_callback(self, callback: Callable[[], None]) -> None:
+        """Inject a callback invoked when /kill CONFIRM is received.
+
+        Args:
+            callback: Typically ``TitanApplication.request_kill`` which
+                sets the shutdown event and kill flag.
+        """
+        self._kill_callback = callback
 
     async def start(self) -> None:
         """Initialize the bot application, register commands, and begin
@@ -492,6 +507,19 @@ class TelegramNotifier:
         self._kill_flag = True
         self._log.warning("kill_switch_activated")
 
+        # Invoke the application-level kill to trigger actual shutdown.
+        if self._kill_callback is not None:
+            try:
+                self._kill_callback()
+                self._log.info("kill_callback_invoked")
+            except Exception:
+                self._log.exception("kill_callback_failed")
+        else:
+            self._log.warning(
+                "kill_callback_not_set",
+                reason="kill flag set but no shutdown callback wired",
+            )
+
         await self._safe_reply(
             update,
             (
@@ -545,7 +573,7 @@ class TelegramNotifier:
             text: The message text (plain text, not Markdown).
         """
         text = self._truncate_message(text)
-        future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         await self._send_queue.put((text, future))
         # Fire-and-forget: callers do not wait for delivery.
 

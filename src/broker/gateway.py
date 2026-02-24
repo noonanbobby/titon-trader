@@ -105,10 +105,7 @@ class GatewayManager:
         # Structured logger bound to this component.
         self._log: structlog.stdlib.BoundLogger = get_logger(
             "broker.gateway",
-            host=host,
-            port=port,
-            client_id=client_id,
-        )
+        ).bind(host=host, port=port, client_id=client_id)
 
         # Connection bookkeeping.
         self._connected_at: float | None = None
@@ -216,7 +213,7 @@ class GatewayManager:
                 port=self._port,
                 clientId=self._client_id,
                 readonly=self._readonly,
-                timeout=15,
+                timeout=30,
             )
         except Exception as exc:
             self._log.warning(
@@ -466,7 +463,7 @@ class GatewayManager:
                     port=self._port,
                     clientId=self._client_id,
                     readonly=self._readonly,
-                    timeout=15,
+                    timeout=30,
                 )
 
                 # Success.

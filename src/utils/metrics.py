@@ -472,7 +472,7 @@ def setup_metrics_server(port: int = DEFAULT_METRICS_PORT) -> threading.Thread:
 
         uvicorn.run(
             app,
-            host="0.0.0.0",
+            host="0.0.0.0",  # noqa: S104 — bound to 127.0.0.1 by Docker port mapping
             port=port,
             log_level="warning",
             access_log=False,
@@ -511,7 +511,7 @@ async def start_metrics_server(
 
         config = uvicorn.Config(
             app=app,
-            host="0.0.0.0",
+            host="0.0.0.0",  # noqa: S104 — bound to 127.0.0.1 by Docker port mapping
             port=port,
             log_level="warning",
             access_log=False,

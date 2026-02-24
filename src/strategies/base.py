@@ -591,6 +591,50 @@ class BaseStrategy(abc.ABC):
         """
         ...
 
+    @abc.abstractmethod
+    async def construct_order(
+        self,
+        signal: TradeSignal,
+        contract_factory: Any,
+    ) -> Any:
+        """Build an IBKR combo order from the trade signal legs.
+
+        Translates the strategy's :class:`LegSpec` objects into the format
+        expected by :meth:`ContractFactory.build_spread` and returns the
+        resulting IBKR ``Contract`` object.
+
+        Args:
+            signal: The approved trade signal containing leg specifications.
+            contract_factory: A :class:`ContractFactory` instance for
+                building IBKR combo contracts.
+
+        Returns:
+            An IBKR ``Contract`` object representing the multi-leg spread.
+        """
+        ...
+
+    @abc.abstractmethod
+    def calculate_greeks(
+        self,
+        legs: list[LegSpec],
+        greeks: dict[str, float],
+    ) -> dict[str, float]:
+        """Aggregate Greeks across all legs of the spread.
+
+        Each leg's Greeks are scaled by its quantity and direction (BUY
+        adds, SELL subtracts) to produce a net position Greek profile.
+
+        Args:
+            legs: The constructed leg specifications.
+            greeks: Per-leg Greeks keyed by ``"{strike}_{right}"``
+                identifier (e.g. ``"450.0_C"``).
+
+        Returns:
+            Dictionary with keys ``"delta"``, ``"gamma"``, ``"theta"``,
+            ``"vega"`` containing the aggregated values.
+        """
+        ...
+
     # ------------------------------------------------------------------
     # Concrete methods -- shared across all strategies
     # ------------------------------------------------------------------

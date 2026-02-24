@@ -58,8 +58,8 @@ PRICE_OUTPUT_PER_M: float = 15.0
 PRICE_THINKING_PER_M: float = 15.0
 
 # Default limits
-DEFAULT_MODEL: str = "claude-sonnet-4-5-20250929"
-DEFAULT_THINKING_BUDGET: int = 8192
+DEFAULT_MODEL: str = "claude-sonnet-4-6"
+DEFAULT_THINKING_BUDGET: int = 16384
 DEFAULT_MAX_TOKENS: int = 4096
 BATCH_DELAY_SECONDS: float = 1.0
 
@@ -243,6 +243,10 @@ class AnalysisInput(BaseModel):
     current_positions: list[dict[str, Any]] = Field(
         default_factory=list,
         description="List of currently open positions",
+    )
+    memory_context: str = Field(
+        default="",
+        description="FinMem context with recent outcomes and regime patterns",
     )
 
 
@@ -578,9 +582,14 @@ class AnalysisAgent:
             f"{len(input_data.current_positions)}\n\n"
             f"### Current Positions\n"
             f"{positions_text}\n\n"
-            f"Analyze this ticker and return your trade "
-            f"recommendation(s) as a JSON array. If no trade is "
-            f"warranted, return an empty array `[]`."
+            + (
+                f"### Trading Memory (FinMem)\n{input_data.memory_context}\n\n"
+                if input_data.memory_context
+                else ""
+            )
+            + "Analyze this ticker and return your trade "
+            "recommendation(s) as a JSON array. If no trade is "
+            "warranted, return an empty array `[]`."
         )
 
     # ------------------------------------------------------------------

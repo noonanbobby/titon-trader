@@ -15,14 +15,14 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import functools
 from datetime import date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-T = TypeVar("T")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -33,34 +33,124 @@ US_EASTERN = ZoneInfo("America/New_York")
 MARKET_OPEN = time(9, 30)
 MARKET_CLOSE = time(16, 0)
 
-# Major US market holidays that are fixed or can be computed for the
-# current/next year.  This list is refreshed manually at the start of
-# each calendar year.  Federal holidays where NYSE is closed:
-_MARKET_HOLIDAYS_2026: set[date] = {
-    date(2026, 1, 1),  # New Year's Day
-    date(2026, 1, 19),  # MLK Day
-    date(2026, 2, 16),  # Presidents' Day
-    date(2026, 4, 3),  # Good Friday
-    date(2026, 5, 25),  # Memorial Day
-    date(2026, 7, 3),  # Independence Day (observed)
-    date(2026, 9, 7),  # Labor Day
-    date(2026, 11, 26),  # Thanksgiving
-    date(2026, 12, 25),  # Christmas
-}
 
-_MARKET_HOLIDAYS_2025: set[date] = {
-    date(2025, 1, 1),  # New Year's Day
-    date(2025, 1, 20),  # MLK Day
-    date(2025, 2, 17),  # Presidents' Day
-    date(2025, 4, 18),  # Good Friday
-    date(2025, 5, 26),  # Memorial Day
-    date(2025, 7, 4),  # Independence Day
-    date(2025, 9, 1),  # Labor Day
-    date(2025, 11, 27),  # Thanksgiving
-    date(2025, 12, 25),  # Christmas
-}
+# ---------------------------------------------------------------------------
+# Dynamic NYSE holiday computation
+# ---------------------------------------------------------------------------
 
-_ALL_HOLIDAYS: set[date] = _MARKET_HOLIDAYS_2025 | _MARKET_HOLIDAYS_2026
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    """Return the *n*-th occurrence of *weekday* in *month/year*.
+
+    Parameters
+    ----------
+    year:
+        Calendar year.
+    month:
+        Calendar month (1–12).
+    weekday:
+        Day of week (0 = Monday, 6 = Sunday).
+    n:
+        Occurrence count (1-based).  Use negative values for last.
+    """
+    if n > 0:
+        first = date(year, month, 1)
+        # Days until the first target weekday
+        delta = (weekday - first.weekday()) % 7
+        candidate = first + timedelta(days=delta)
+        candidate += timedelta(weeks=n - 1)
+        return candidate
+    else:
+        # Last occurrence: start from last day of month
+        if month == 12:
+            last = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            last = date(year, month + 1, 1) - timedelta(days=1)
+        delta = (last.weekday() - weekday) % 7
+        candidate = last - timedelta(days=delta)
+        candidate -= timedelta(weeks=abs(n) - 1)
+        return candidate
+
+
+def _easter_date(year: int) -> date:
+    """Compute Easter Sunday using the Anonymous Gregorian algorithm."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l_ = (32 + 2 * e + 2 * i - h - k) % 7  # noqa: E741
+    m = (a + 11 * h + 22 * l_) // 451
+    month, day = divmod(h + l_ - 7 * m + 114, 31)
+    return date(year, month, day + 1)
+
+
+def _observed(d: date) -> date:
+    """Apply the NYSE observation rule for fixed holidays.
+
+    If the holiday falls on Saturday, the prior Friday is observed.
+    If the holiday falls on Sunday, the following Monday is observed.
+    """
+    if d.weekday() == 5:  # Saturday
+        return d - timedelta(days=1)
+    if d.weekday() == 6:  # Sunday
+        return d + timedelta(days=1)
+    return d
+
+
+@functools.lru_cache(maxsize=8)
+def compute_nyse_holidays(year: int) -> frozenset[date]:
+    """Compute all NYSE-observed market holidays for *year*.
+
+    This replaces the hardcoded holiday sets and works for any year.
+    Covers: New Year's Day, MLK Day, Presidents' Day, Good Friday,
+    Memorial Day, Juneteenth, Independence Day, Labor Day,
+    Thanksgiving Day, and Christmas Day.
+
+    Returns:
+        A frozenset of dates on which the NYSE is closed.
+    """
+    holidays: set[date] = set()
+
+    # New Year's Day (Jan 1, observed)
+    holidays.add(_observed(date(year, 1, 1)))
+
+    # MLK Day — 3rd Monday of January
+    holidays.add(_nth_weekday(year, 1, 0, 3))
+
+    # Presidents' Day — 3rd Monday of February
+    holidays.add(_nth_weekday(year, 2, 0, 3))
+
+    # Good Friday — Friday before Easter Sunday
+    easter = _easter_date(year)
+    holidays.add(easter - timedelta(days=2))
+
+    # Memorial Day — last Monday of May
+    holidays.add(_nth_weekday(year, 5, 0, -1))
+
+    # Juneteenth (June 19, observed) — NYSE holiday since 2022
+    holidays.add(_observed(date(year, 6, 19)))
+
+    # Independence Day (July 4, observed)
+    holidays.add(_observed(date(year, 7, 4)))
+
+    # Labor Day — 1st Monday of September
+    holidays.add(_nth_weekday(year, 9, 0, 1))
+
+    # Thanksgiving Day — 4th Thursday of November
+    holidays.add(_nth_weekday(year, 11, 3, 4))
+
+    # Christmas Day (Dec 25, observed)
+    holidays.add(_observed(date(year, 12, 25)))
+
+    return frozenset(holidays)
+
+
+def is_market_holiday(d: date) -> bool:
+    """Return ``True`` if *d* is a known NYSE market holiday."""
+    return d in compute_nyse_holidays(d.year)
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +160,7 @@ _ALL_HOLIDAYS: set[date] = _MARKET_HOLIDAYS_2025 | _MARKET_HOLIDAYS_2026
 
 def _is_trading_day(d: date) -> bool:
     """Return True if *d* is a weekday and not a known market holiday."""
-    return d.weekday() < 5 and d not in _ALL_HOLIDAYS
+    return d.weekday() < 5 and not is_market_holiday(d)
 
 
 def market_is_open() -> bool:

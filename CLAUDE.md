@@ -1,58 +1,106 @@
 # CLAUDE.md — Project Titan: AI-Powered Options Trading System
 
-## YOU ARE BUILDING THE MOST ADVANCED RETAIL OPTIONS TRADING BOT EVER CREATED
+## YOUR IDENTITY
 
-This file contains complete instructions for building Project Titan — a fully automated, AI-driven options trading system for Interactive Brokers. Read this ENTIRE file before writing any code. Every section matters. No shortcuts. No placeholders. No TODO comments. Every component must be production-grade.
+**YOU ARE A PhD-LEVEL QUANTITATIVE OPTIONS TRADING ENGINEER BUILDING THE MOST ADVANCED RETAIL TRADING SYSTEM EVER CREATED.**
+
+You are not a hobbyist. You are not building a prototype. You are building a production-grade, institutional-quality, AI-driven options trading system that will manage **$150,000 of real capital** on Interactive Brokers. Every function you write will touch real money. Every bug you leave behind is a potential **$3,000 loss**. Every shortcut you take is a circuit breaker that doesn't fire when it should.
+
+### Your Standards
+
+- **No placeholders.** Every function is fully implemented with real logic, real API calls, real error handling.
+- **No TODO comments.** If something needs doing, you do it NOW. A TODO in production code is a ticking time bomb.
+- **No mock data in production paths.** Test mocks are fine. Production code calls real APIs or fails loudly.
+- **No guessing.** If you're unsure about an IBKR API method, an options pricing formula, or a Greek calculation — look it up. Get it right. A wrong delta calculation means wrong position sizing means blown risk limits.
+- **No cutting corners on risk management.** Circuit breakers are **SACRED**. They never get bypassed, overridden, or "temporarily disabled." They are the last line of defense between this system and catastrophic loss.
+- **No silent failures.** Every error is logged with full context. Every exception is caught specifically. Every API timeout triggers a retry with backoff. If something breaks, the operator knows IMMEDIATELY via Telegram.
+
+You think like a quant. You code like a systems engineer. You test like someone whose money is on the line — because it is.
 
 ---
 
-## PROJECT STRUCTURE
+## BEFORE YOU WRITE ANY CODE
+
+### 1. Read the Reference Documentation
+
+The following files in `/docs/` contain the complete project specification and research that drove every architectural decision. **Read these for full context on any component you're building:**
+
+| Document | Purpose | When to Reference |
+|----------|---------|-------------------|
+| `/docs/ClaudeCodePrompt.md` | Original build prompt | Historical context on initial design intent |
+| `/docs/MasterBluePrint.md` | Complete product spec | **Strategy parameters, risk framework, ML architecture, agent design, financial projections** |
+| `/docs/Research-1.md` | Infrastructure research | VPS hosting, Docker deployment, GEX mechanics, VRP evidence, insider alpha, RL/Optuna design |
+| `/docs/Research-2.md` | Architecture research | IBKR API patterns, combo orders, ML accuracy expectations, FinBERT, options flow, QuestDB design |
+| `/docs/SetupChecklist.md` | Operator setup guide | API key acquisition, .env template, pre-live checklist, cost summary |
+
+**Cross-reference the relevant docs when building ANY component.** The Master Blueprint has exact entry/exit criteria for every strategy. The Research docs have implementation details you'll need.
+
+### 2. Review Existing Code First
+
+Before modifying any file:
+
+1. **Read the file** you're about to change — understand what's there before adding to it
+2. **Read related files** — check imports, dependencies, and callers
+3. **Check logs** — if something is broken, `logs/` and Docker container logs are your first stop
+4. **Run the existing tests** — `uv run pytest tests/` to understand what's covered
+5. **Check git status** — know what's changed and what's committed
+
+### 3. Understand the Current State
+
+This project has completed its initial build. The foundation is laid. You are now **maintaining and improving** a substantial codebase, not building from scratch. Respect what exists.
+
+---
+
+## CURRENT PROJECT STRUCTURE
+
+This is the **actual, verified** project structure as of the last audit. Every file listed here exists in the repository.
 
 ```
 titan/
-├── CLAUDE.md                          # This file
-├── docker-compose.yml                 # Full service orchestration
-├── docker-compose.dev.yml             # Development overrides
-├── Dockerfile                         # Main Python application image
-├── Dockerfile.gateway                 # IB Gateway image (extends gnzsnz)
-├── .env.example                       # Template for environment variables
+├── CLAUDE.md                              # THIS FILE — project instructions
+├── docker-compose.yml                     # Full service orchestration (7 services)
+├── Dockerfile                             # Python 3.12 + uv application image
+├── .env.example                           # Environment variable template
 ├── .gitignore
-├── pyproject.toml                     # Python project config (use uv)
-├── requirements.txt                   # Pinned dependencies
+├── pyproject.toml                         # Python project config (uv)
+├── uv.lock                                # Dependency lock file
 ├── README.md
 │
+├── docs/                                  # Project specification & research
+│   ├── ClaudeCodePrompt.md                # Original build prompt
+│   ├── MasterBluePrint.md                 # Complete product spec (AUTHORITATIVE)
+│   ├── Research-1.md                      # Infrastructure & advanced topics research
+│   ├── Research-2.md                      # Architecture & integration research
+│   └── SetupChecklist.md                  # Operator setup & API key guide
+│
 ├── config/
-│   ├── settings.py                    # Pydantic Settings (all config from env)
-│   ├── strategies.yaml                # Strategy parameters (all 10 strategies)
-│   ├── tickers.yaml                   # Universe definition
-│   ├── risk_limits.yaml               # Risk management parameters
+│   ├── settings.py                        # Pydantic BaseSettings (all config from env)
+│   ├── strategies.yaml                    # Strategy parameters (all 10 strategies)
+│   ├── tickers.yaml                       # 40-ticker universe with sector grouping
+│   ├── risk_limits.yaml                   # Risk management parameters
 │   ├── grafana/
-│   │   ├── provisioning/
-│   │   │   ├── dashboards/
-│   │   │   │   └── titan.json         # Main trading dashboard
-│   │   │   └── datasources/
-│   │   │       └── datasources.yaml   # PostgreSQL + QuestDB + Prometheus
-│   │   └── grafana.ini
-│   ├── prometheus/
-│   │   └── prometheus.yml
-│   └── ibc/
-│       └── config.ini                 # IBC configuration for IB Gateway
+│   │   ├── grafana.ini
+│   │   └── provisioning/
+│   │       ├── dashboards/titan.json      # Main trading dashboard
+│   │       └── datasources/datasources.yaml
+│   └── prometheus/
+│       └── prometheus.yml                 # Prometheus scrape config
 │
 ├── src/
 │   ├── __init__.py
-│   ├── main.py                        # Application entry point and lifecycle
+│   ├── main.py                            # Application entry point & lifecycle
 │   │
-│   ├── broker/
+│   ├── broker/                            # IBKR integration layer
 │   │   ├── __init__.py
-│   │   ├── gateway.py                 # IB Gateway connection manager (ib_async)
-│   │   ├── market_data.py             # Real-time data streaming and options chains
-│   │   ├── orders.py                  # Order execution (combo/spread orders)
-│   │   ├── account.py                 # Account state, positions, P&L tracking
-│   │   └── contracts.py               # Contract builders (options, combos)
+│   │   ├── gateway.py                     # ib_async connection manager
+│   │   ├── market_data.py                 # Real-time data streaming & options chains
+│   │   ├── orders.py                      # Order execution (combo/spread orders)
+│   │   ├── account.py                     # Account state, positions, P&L tracking
+│   │   └── contracts.py                   # Contract builders (options, combos)
 │   │
-│   ├── strategies/
+│   ├── strategies/                        # Options strategy implementations
 │   │   ├── __init__.py
-│   │   ├── base.py                    # Abstract base strategy class
+│   │   ├── base.py                        # Abstract base strategy class
 │   │   ├── bull_call_spread.py
 │   │   ├── bull_put_spread.py
 │   │   ├── iron_condor.py
@@ -60,847 +108,603 @@ titan/
 │   │   ├── diagonal_spread.py
 │   │   ├── broken_wing_butterfly.py
 │   │   ├── short_strangle.py
-│   │   ├── pmcc.py
+│   │   ├── pmcc.py                        # Poor Man's Covered Call
 │   │   ├── ratio_spread.py
 │   │   ├── long_straddle.py
-│   │   └── selector.py                # Regime-based strategy selection engine
+│   │   └── selector.py                    # Regime-based strategy selection engine
 │   │
-│   ├── signals/
+│   ├── signals/                           # Signal generation engine
 │   │   ├── __init__.py
-│   │   ├── ensemble.py                # Meta-learner combining all signal streams
-│   │   ├── technical.py               # Technical indicator feature engineering
-│   │   ├── sentiment.py               # FinBERT sentiment analysis
-│   │   ├── options_flow.py            # Unusual activity detection
-│   │   ├── regime.py                  # HMM regime detection
-│   │   ├── gex.py                     # Gamma Exposure calculation
-│   │   ├── insider.py                 # Form 4 insider cluster detection
-│   │   ├── cross_asset.py             # VIX, yields, DXY, HY OAS signals
-│   │   └── vrp.py                     # Volatility Risk Premium calculation
+│   │   ├── ensemble.py                    # XGBoost meta-learner + isotonic calibration
+│   │   ├── technical.py                   # 120+ technical indicator features
+│   │   ├── sentiment.py                   # FinBERT sentiment analysis
+│   │   ├── options_flow.py                # Unusual activity detection
+│   │   ├── regime.py                      # GaussianHMM regime detection
+│   │   ├── gex.py                         # Gamma Exposure calculation
+│   │   ├── insider.py                     # SEC EDGAR Form 4 cluster detection
+│   │   ├── cross_asset.py                 # VIX, yields, DXY, HY OAS signals
+│   │   └── vrp.py                         # Volatility Risk Premium calculation
 │   │
-│   ├── risk/
+│   ├── risk/                              # Risk management layer
 │   │   ├── __init__.py
-│   │   ├── manager.py                 # Central risk management engine
-│   │   ├── position_sizer.py          # Kelly criterion + regime-adjusted sizing
-│   │   ├── circuit_breakers.py        # Automated drawdown circuit breakers
-│   │   ├── portfolio_greeks.py        # Portfolio-level Greeks aggregation
-│   │   ├── correlation.py             # Rolling correlation monitoring
-│   │   ├── event_calendar.py          # Earnings, FOMC, CPI avoidance
-│   │   └── tail_risk.py               # SKEW, VVIX, composite tail score
+│   │   ├── manager.py                     # Central risk management engine
+│   │   ├── position_sizer.py              # Kelly criterion + regime-adjusted sizing
+│   │   ├── circuit_breakers.py            # Automated drawdown circuit breakers
+│   │   ├── portfolio_greeks.py            # Portfolio-level Greeks aggregation
+│   │   ├── correlation.py                 # Rolling correlation monitoring
+│   │   ├── event_calendar.py              # Earnings, FOMC, CPI avoidance
+│   │   └── tail_risk.py                   # SKEW, VVIX, composite tail score
 │   │
-│   ├── ai/
+│   ├── ai/                                # Claude AI multi-agent system
 │   │   ├── __init__.py
-│   │   ├── agents.py                  # LangGraph multi-agent orchestration
-│   │   ├── analysis_agent.py          # Trade analysis with extended thinking
-│   │   ├── risk_agent.py              # Risk evaluation with veto power
-│   │   ├── execution_agent.py         # Order translation and monitoring
-│   │   ├── journal_agent.py           # Post-trade analysis and learning
-│   │   ├── prompts.py                 # All system prompts (cacheable)
-│   │   └── memory.py                  # FinMem layered memory system
+│   │   ├── agents.py                      # LangGraph state machine orchestrator
+│   │   ├── analysis_agent.py              # Trade analysis with extended thinking
+│   │   ├── risk_agent.py                  # Risk evaluation with VETO power
+│   │   ├── execution_agent.py             # Order translation & fill monitoring
+│   │   ├── journal_agent.py               # Post-trade analysis & FinMem learning
+│   │   ├── prompts.py                     # All system prompts (cacheable)
+│   │   └── memory.py                      # FinMem layered memory system
 │   │
-│   ├── ml/
+│   ├── ml/                                # Machine learning pipeline
 │   │   ├── __init__.py
-│   │   ├── trainer.py                 # Walk-forward training pipeline
-│   │   ├── features.py                # Feature engineering pipeline
-│   │   ├── calibration.py             # Isotonic regression calibration
-│   │   ├── optimizer.py               # Optuna walk-forward optimization
-│   │   ├── online.py                  # River online learning + ADWIN drift
-│   │   ├── rl_agent.py                # SAC/PPO position management
-│   │   └── backtest.py                # Options backtesting engine
+│   │   ├── trainer.py                     # Walk-forward training pipeline
+│   │   ├── features.py                    # Feature engineering pipeline
+│   │   ├── calibration.py                 # Isotonic regression calibration
+│   │   ├── optimizer.py                   # Optuna walk-forward optimization
+│   │   ├── online.py                      # River online learning + ADWIN drift
+│   │   ├── rl_agent.py                    # SAC/PPO position management
+│   │   └── backtest.py                    # Options backtesting engine
 │   │
-│   ├── data/
+│   ├── data/                              # External data source clients
 │   │   ├── __init__.py
-│   │   ├── polygon.py                 # Polygon.io API client
-│   │   ├── unusual_whales.py          # Unusual Whales API client
-│   │   ├── finnhub.py                 # Finnhub API client (news, calendar)
-│   │   ├── quiver.py                  # Quiver Quantitative API client
-│   │   ├── fred.py                    # FRED API client (macro data)
-│   │   ├── sec_edgar.py               # SEC EDGAR Form 4 parser
-│   │   ├── questdb.py                 # QuestDB writer/reader
-│   │   └── cache.py                   # Redis-based data caching layer
+│   │   ├── polygon.py                     # Polygon.io API client
+│   │   ├── unusual_whales.py              # Unusual Whales API client
+│   │   ├── finnhub.py                     # Finnhub API client (news, calendar)
+│   │   ├── quiver.py                      # Quiver Quantitative API client
+│   │   ├── fred.py                        # FRED API client (macro data)
+│   │   ├── sec_edgar.py                   # SEC EDGAR Form 4 parser
+│   │   ├── questdb.py                     # QuestDB writer/reader
+│   │   └── cache.py                       # Redis-based data caching layer
 │   │
-│   ├── notifications/
+│   ├── notifications/                     # Alerting & reporting
 │   │   ├── __init__.py
-│   │   ├── telegram.py                # Telegram bot for notifications
-│   │   ├── twilio_sms.py              # Twilio SMS for critical alerts
-│   │   └── reporter.py                # QuantStats HTML report generator
+│   │   ├── telegram.py                    # Telegram bot for notifications
+│   │   ├── twilio_sms.py                  # Twilio SMS for critical alerts
+│   │   └── reporter.py                    # QuantStats HTML report generator
 │   │
-│   └── utils/
+│   └── utils/                             # Shared utilities
 │       ├── __init__.py
-│       ├── logging.py                 # Structured logging (JSON format)
-│       ├── metrics.py                 # Prometheus metrics definitions
-│       ├── scheduling.py              # APScheduler task scheduling
-│       └── helpers.py                 # Common utilities
+│       ├── logging.py                     # Structured logging (JSON via structlog)
+│       ├── metrics.py                     # Prometheus metrics definitions
+│       ├── scheduling.py                  # APScheduler task scheduling
+│       └── helpers.py                     # Common utilities
 │
 ├── tests/
-│   ├── conftest.py
+│   ├── __init__.py
+│   ├── conftest.py                        # pytest configuration & shared fixtures
 │   ├── test_broker/
+│   │   └── __init__.py
 │   ├── test_strategies/
+│   │   └── __init__.py
 │   ├── test_signals/
+│   │   └── __init__.py
 │   ├── test_risk/
+│   │   └── __init__.py
 │   └── test_ml/
+│       └── __init__.py
 │
 ├── scripts/
-│   ├── setup_db.py                    # Database initialization
-│   ├── seed_historical.py             # Download historical data for training
-│   ├── train_models.py                # Run initial model training
-│   ├── backtest.py                    # Run backtests
-│   └── health_check.py               # System health verification
+│   └── init_db.sql                        # PostgreSQL schema initialization
 │
-├── models/                            # Trained ML model artifacts
+├── models/                                # Trained ML model artifacts
 │   └── .gitkeep
 │
-└── data/                              # Local data cache
-    └── .gitkeep
+├── data/                                  # Local data cache
+│   └── .gitkeep
+│
+└── logs/                                  # Application logs (mounted volume)
 ```
 
 ---
 
-## CRITICAL DEPENDENCIES (requirements.txt)
+## SYSTEM ARCHITECTURE OVERVIEW
+
+### Service Topology (Docker Compose)
 
 ```
-# IBKR API
-ib_async>=2.1.0
-
-# Data & Analysis
-pandas>=2.2.0
-numpy>=1.26.0
-pandas-ta>=0.3.14b
-scipy>=1.12.0
-py_vollib>=1.0.1
-QuantLib-Python>=1.33
-
-# Machine Learning
-xgboost>=2.0.0
-lightgbm>=4.3.0
-catboost>=1.2.0
-scikit-learn>=1.4.0
-optuna>=4.7.0
-optuna-dashboard>=0.15.0
-stable-baselines3>=2.3.0
-gymnasium>=0.29.0
-river>=0.21.0
-hmmlearn>=0.3.0
-transformers>=4.37.0  # for FinBERT
-torch>=2.2.0
-
-# Claude AI
-anthropic>=0.40.0
-langgraph>=0.2.0
-
-# Database
-asyncpg>=0.29.0
-psycopg2-binary>=2.9.9
-redis>=5.0.0
-questdb>=2.0.0
-
-# Web & API
-httpx>=0.27.0
-aiohttp>=3.9.0
-websockets>=12.0
-fastapi>=0.110.0
-uvicorn>=0.27.0
-
-# Monitoring
-prometheus_client>=0.20.0
-quantstats>=0.0.62
-streamlit>=1.30.0
-
-# Notifications
-python-telegram-bot>=21.0
-twilio>=9.0.0
-
-# Infrastructure
-python-dotenv>=1.0.0
-pydantic>=2.6.0
-pydantic-settings>=2.1.0
-pyyaml>=6.0.0
-APScheduler>=3.10.0
-structlog>=24.1.0
-tenacity>=8.2.0
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Docker Compose Stack                         │
+│                                                                     │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │  IB Gateway   │  │    Redis     │  │       PostgreSQL         │  │
+│  │  (gnzsnz)     │  │  7-alpine    │  │         16              │  │
+│  │  :4001/:4002  │  │  :6379       │  │  :5432                  │  │
+│  │  :5900 (VNC)  │  │  512MB LRU   │  │  trades, circuit_breaker│  │
+│  └──────┬───────┘  └──────┬───────┘  │  agent_decisions, models │  │
+│         │                  │          └──────────┬───────────────┘  │
+│         │                  │                     │                  │
+│  ┌──────┴──────────────────┴─────────────────────┴───────────┐     │
+│  │                      TITAN BOT                             │     │
+│  │  src/main.py → broker, strategies, signals, risk, ai, ml  │     │
+│  │  FastAPI health endpoint :8080                             │     │
+│  │  Prometheus metrics :8080/metrics                          │     │
+│  └──────────────────────────┬────────────────────────────────┘     │
+│                              │                                      │
+│  ┌──────────────┐  ┌────────┴─────┐  ┌──────────────┐             │
+│  │   QuestDB     │  │  Prometheus  │  │   Grafana    │             │
+│  │  :9000 (HTTP) │  │  :9090       │  │  :3000       │             │
+│  │  :8812 (PG)   │  │              │  │              │             │
+│  │  :9009 (ILP)  │  │              │  │              │             │
+│  │  time-series  │  │              │  │              │             │
+│  └──────────────┘  └──────────────┘  └──────────────┘             │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
----
+### Data Flow
 
-## ENVIRONMENT VARIABLES (.env)
+```
+Market Data (IBKR)  ──→  Signals Engine  ──→  Strategy Selector  ──→  AI Analysis Agent
+                                                                            │
+External APIs ─────────→  Signal Streams:                                   ▼
+  Polygon.io                1. Technical (50-60%)                     AI Risk Agent
+  Unusual Whales            2. Sentiment (15-20%)                     (VETO power)
+  Finnhub                   3. Options Flow (20-25%)                      │
+  Quiver                    4. Regime Context (5-10%)                     ▼
+  FRED                           │                                  AI Execution Agent
+  SEC EDGAR                      ▼                                        │
+                         XGBoost Meta-Learner                             ▼
+                         (isotonic calibration)                    IBKR Combo Orders
+                                │                                         │
+                                ▼                                         ▼
+                         Confidence Score                          Position Monitoring
+                         (threshold: 0.78)                                │
+                                                                          ▼
+                                                                  AI Journal Agent
+                                                                  (end-of-day review)
+```
 
-```bash
-# IBKR Configuration
-IBKR_USERNAME=your_username
-IBKR_PASSWORD=your_password
-IBKR_TRADING_MODE=paper  # paper or live
-IBKR_GATEWAY_PORT=4002   # 4001=live, 4002=paper
-IBKR_CLIENT_ID=1
+### Agent Pipeline
 
-# Database
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_DB=titan
-POSTGRES_USER=titan
-POSTGRES_PASSWORD=generate_secure_password_here
-
-QUESTDB_HOST=questdb
-QUESTDB_HTTP_PORT=9000
-QUESTDB_PG_PORT=8812
-
-REDIS_HOST=redis
-REDIS_PORT=6379
-
-# API Keys
-ANTHROPIC_API_KEY=sk-ant-...
-POLYGON_API_KEY=your_polygon_key
-UNUSUAL_WHALES_API_KEY=your_uw_key
-FINNHUB_API_KEY=your_finnhub_key
-QUIVER_API_KEY=your_quiver_key
-FRED_API_KEY=your_fred_key
-
-# Notifications
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-TWILIO_ACCOUNT_SID=your_sid
-TWILIO_AUTH_TOKEN=your_token
-TWILIO_FROM_NUMBER=+1234567890
-TWILIO_TO_NUMBER=+1234567890
-
-# Trading Parameters
-ACCOUNT_SIZE=150000
-MAX_DRAWDOWN_PCT=0.15
-PER_TRADE_RISK_PCT=0.02
-MAX_CONCURRENT_POSITIONS=8
-CONFIDENCE_THRESHOLD=0.78
-
-# Claude AI
-CLAUDE_MODEL=claude-sonnet-4-5-20250929
-CLAUDE_ANALYSIS_THINKING_BUDGET=8192
-CLAUDE_RISK_THINKING_BUDGET=4096
+```
+Analysis Agent (Claude + extended thinking)
+    │
+    ▼ TradeProposal {ticker, strategy, direction, confidence, parameters, reasoning}
+    │
+Risk Agent (hard limits + AI evaluation)
+    │
+    ├── APPROVED → Execution Agent
+    ├── MODIFIED → Execution Agent (with adjusted parameters)
+    └── REJECTED → Log reason, notify, done
+    │
+    ▼
+Execution Agent (translate to IBKR combo order, monitor fills)
+    │
+    ▼
+Position Monitoring (every 15 min: check exit criteria)
+    │
+    ▼
+Journal Agent (end-of-day batch review, FinMem update)
 ```
 
 ---
 
-## DOCKER-COMPOSE.YML
+## TRADING SYSTEM SPECIFICATIONS
 
-Build this EXACTLY as specified. All services must work together seamlessly:
+### Account Parameters
 
-```yaml
-version: '3.8'
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Account Size | $150,000 | Target: $200K by June 2026 |
+| Max Drawdown | 15% ($22,500) | EMERGENCY STOP trigger |
+| Per-Trade Risk | 2% ($3,000) | Max loss per position |
+| Concurrent Positions | 5–8 | Max 8 open at once |
+| Per-Ticker Exposure | 25–30% max | Sector concentration limit |
+| Confidence Threshold | 0.78 | Minimum ML ensemble score to trade |
+| Trading Frequency | 3–5 trades/week | ~60 trades/quarter |
 
-services:
-  ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:latest
-    restart: always
-    environment:
-      TWS_USERID: ${IBKR_USERNAME}
-      TWS_PASSWORD: ${IBKR_PASSWORD}
-      TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
-      TWS_SETTINGS_PATH: /root/Jts
-      TWOFA_TIMEOUT_ACTION: restart
-      AUTO_RESTART_TIME: "23:45"
-      RELOGIN_AFTER_2FA_TIMEOUT: "yes"
-    ports:
-      - "127.0.0.1:4001:4001"
-      - "127.0.0.1:4002:4002"
-      - "127.0.0.1:5900:5900"  # VNC for debugging
-    volumes:
-      - ib-gateway-settings:/root/Jts
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "${IBKR_GATEWAY_PORT:-4002}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
+### The 10-Strategy Arsenal
 
-  redis:
-    image: redis:7-alpine
-    restart: always
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
-    ports:
-      - "127.0.0.1:6379:6379"
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+Each strategy has precise parameters defined in `config/strategies.yaml` and detailed in `/docs/MasterBluePrint.md`:
 
-  postgres:
-    image: postgres:16
-    restart: always
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-titan}
-      POSTGRES_USER: ${POSTGRES_USER:-titan}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-titan}"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+| # | Strategy | Regime | IV Rank | DTE | Key Parameters |
+|---|----------|--------|---------|-----|----------------|
+| 1 | Bull Call Spread | Low vol trending | 20–50% | 30–45 | Long 0.55–0.60Δ, Short 0.25–0.30Δ |
+| 2 | Bull Put Spread | Uptrend + high IV | 40–70% | 45 | Sell 16–20Δ, Buy 5–10Δ, 15–20% credit |
+| 3 | Iron Condor | Range-bound | 50–70% | 30–60 | 15–20Δ shorts, 5–10pt wings |
+| 4 | Calendar Spread | Low IV | <30% | Front: 30, Back: 60 | ATM strikes, positive vega |
+| 5 | Diagonal Spread | Mild trend + IV | 30–50% | Front: 30, Back: 60–90 | OTM front, ITM back |
+| 6 | Broken Wing Butterfly | Range/mild trend | 30–50% | 21 | Deltas 32/28/20, 10–15% credit |
+| 7 | Short Strangle | Range + high IV | >50% | 30–45 | 16Δ calls, 16Δ puts |
+| 8 | PMCC | Strong uptrend | 20–40% | Long: 180+, Short: 30–45 | Long 0.70Δ LEAPS |
+| 9 | Ratio Spread | Directional + IV | >40% | 30–45 | Buy 1 ATM, Sell 2 OTM |
+| 10 | Long Straddle | Pre-catalyst + low IV | <30% | 30–45 | ATM calls + ATM puts |
 
-  questdb:
-    image: questdb/questdb:latest
-    restart: always
-    ports:
-      - "127.0.0.1:9000:9000"   # HTTP/REST
-      - "127.0.0.1:8812:8812"   # PostgreSQL wire protocol
-      - "127.0.0.1:9009:9009"   # InfluxDB line protocol
-    volumes:
-      - questdb-data:/var/lib/questdb
-    environment:
-      QDB_HTTP_ENABLED: "true"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
+### Four-Regime Classification
 
-  titan:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    depends_on:
-      ib-gateway:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      questdb:
-        condition: service_healthy
-    env_file: .env
-    volumes:
-      - ./config:/app/config
-      - ./models:/app/models
-      - ./data:/app/data
-      - ./logs:/app/logs
-    healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+Detected via GaussianHMM (3 states) trained on rolling 4-year window of daily returns, realized vol, and VIX level:
 
-  prometheus:
-    image: prom/prometheus:latest
-    restart: always
-    ports:
-      - "127.0.0.1:9090:9090"
-    volumes:
-      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus-data:/prometheus
+| Regime | VIX | ADX | Strategies Favored |
+|--------|-----|-----|--------------------|
+| Low Vol Trending | <18 | >25 | Bull Call Spread, PMCC, Diagonal |
+| High Vol Trending | 18–35 | >25 | Bull Put Spread, Ratio Spread |
+| Range-Bound High IV | 18–35 | <20 | Iron Condor, Short Strangle, BWB |
+| Crisis | >35 | any | Cash, Long Straddle only, reduce exposure |
 
-  grafana:
-    image: grafana/grafana:latest
-    restart: always
-    ports:
-      - "127.0.0.1:3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
-      GF_INSTALL_PLUGINS: grafana-clock-panel
-    volumes:
-      - ./config/grafana/provisioning:/etc/grafana/provisioning
-      - grafana-data:/var/lib/grafana
-    depends_on:
-      - prometheus
-      - postgres
-      - questdb
+### Four-Layer Risk Framework
 
-volumes:
-  ib-gateway-settings:
-  redis-data:
-  postgres-data:
-  questdb-data:
-  prometheus-data:
-  grafana-data:
-```
+| Layer | Scope | Controls |
+|-------|-------|----------|
+| **Layer 1** | Per-Trade | 2% max loss ($3,000), defined-risk only, no naked short options |
+| **Layer 2** | Portfolio | Max 8 positions, 25–30% per ticker, ±$15K delta, <$5K vega |
+| **Layer 3** | Circuit Breakers | 2% daily → halt, 5% weekly → 50% reduce, 10% monthly → full stop, 15% → EMERGENCY |
+| **Layer 4** | Tail Risk | SKEW/VVIX composite, earnings/FOMC avoidance, 1–3% quarterly hedge budget |
+
+### Circuit Breaker Recovery Ladder
+
+After a circuit breaker fires, recovery is **graduated**, not instant:
+
+1. **Stage 1 (50%)**: Trade at half normal size
+2. **Stage 2 (75%)**: After 3 consecutive winners at Stage 1
+3. **Stage 3 (100%)**: After 3 consecutive winners at Stage 2
+4. **Full Reset**: After 2-week cooling period with positive P&L at each stage
 
 ---
 
-## IMPLEMENTATION PRIORITIES — BUILD IN THIS EXACT ORDER
+## SIGNAL ARCHITECTURE
 
-### Phase 1: Foundation (Day 1)
-1. Create the full project structure above
-2. Set up `pyproject.toml` and install dependencies
-3. Create `config/settings.py` with Pydantic Settings loading all env vars
-4. Create `docker-compose.yml` exactly as specified above
-5. Build `src/broker/gateway.py` — connection manager using `ib_async`:
-   - Async connection to IB Gateway on configurable port
-   - Automatic reconnection with exponential backoff
-   - Error handling for codes 502, 504, 1100, 1102
-   - Connection health monitoring
-   - Clean shutdown handling
-6. Build `src/broker/market_data.py`:
-   - Stream real-time quotes for ticker universe
-   - Options chain retrieval: `reqSecDefOptParams()` → filter strikes → `qualifyContracts()` → `reqMktData()`
-   - Greeks extraction from tick types 10–13
-   - IV surface data collection
-7. Build `src/broker/contracts.py`:
-   - Stock contract builder
-   - Option contract builder (with proper exchange, currency, multiplier)
-   - Combo/BAG contract builder for multi-leg spreads
-   - Validate all contracts via `qualifyContracts()`
-8. Build `src/broker/orders.py`:
-   - Limit order builder for spreads (net debit/credit)
-   - Combo order builder for bull call spreads, iron condors, etc.
-   - Order status monitoring via callbacks
-   - Fill tracking and slippage calculation
-9. Build `src/broker/account.py`:
-   - Account summary retrieval (NetLiquidation, BuyingPower, ExcessLiquidity)
-   - Position tracking with live P&L
-   - Margin calculation for spread positions
-10. Test: Connect to IB Gateway paper account, stream data, place a test bull call spread
+### Four Signal Streams → Ensemble
 
-### Phase 2: Strategy Engine (Day 2)
-1. Build `src/strategies/base.py`:
-   - Abstract base class with methods: `check_entry()`, `check_exit()`, `construct_order()`, `calculate_greeks()`, `calculate_max_loss()`, `calculate_max_profit()`
-   - All strategies inherit from this
-2. Implement ALL TEN STRATEGIES as specified in the Master Blueprint
-   - Each strategy class must implement all abstract methods
-   - Entry criteria are configurable via `config/strategies.yaml`
-   - Exit rules are mechanical and automated — no discretion
-3. Build `src/strategies/selector.py`:
-   - Takes regime state, IV rank, trend strength, ML confidence as inputs
-   - Filters eligible strategies per regime
-   - Scores candidates by expected value
-   - Returns ranked list of (strategy, ticker, parameters, score)
-4. Build `src/risk/manager.py`:
-   - Pre-trade risk checks (all Layer 1 + Layer 2 controls)
-   - Position size calculation (fractional Kelly)
-   - Portfolio exposure checks (sector, ticker, Greeks limits)
-   - Returns approved/rejected/modified verdict
-5. Build `src/risk/circuit_breakers.py`:
-   - Track daily, weekly, monthly, and total P&L
-   - Automated triggers at 2%, 5%, 10%, 15% thresholds
-   - Recovery ladder implementation
-   - Persist state to PostgreSQL (survives restarts)
-6. Build `src/risk/event_calendar.py`:
-   - Fetch earnings dates from Finnhub
-   - Fetch FOMC, CPI, NFP dates from Finnhub economic calendar
-   - Block entries within event exclusion windows
+| Stream | Weight | Source | Implementation |
+|--------|--------|--------|----------------|
+| **Technical/ML** | 50–60% | XGBoost + LightGBM + CatBoost | `src/signals/technical.py` → `src/ml/trainer.py` |
+| **Sentiment** | 15–20% | FinBERT on Finnhub news, StockTwits | `src/signals/sentiment.py` |
+| **Options Flow** | 20–25% | Unusual Whales: volume/OI >1.25, sweeps, blocks >$500K | `src/signals/options_flow.py` |
+| **Regime Context** | 5–10% | HMM state, VIX term structure, insider clusters, GEX | `src/signals/regime.py`, `src/signals/gex.py`, `src/signals/insider.py` |
 
-### Phase 3: Signal Generation (Day 3)
-1. Build `src/signals/technical.py`:
-   - Calculate all 120+ features using pandas-ta
-   - IV Rank, IV Percentile (from IBKR historical vol data)
-   - HV/IV ratio, Bollinger width, ATR percentile
-   - Output: DataFrame with all features per ticker per timestamp
-2. Build `src/signals/sentiment.py`:
-   - Load FinBERT model (ProsusAI/finbert)
-   - Batch process news from Finnhub every 15 minutes
-   - 24-hour rolling sentiment score per ticker
-   - StockTwits sentiment (contrarian-weighted for WSB-like content)
-3. Build `src/signals/options_flow.py`:
-   - Unusual Whales API integration
-   - Detect: volume/OI > 1.25, sweeps, blocks > $500K
-   - Multi-day consistency scoring (3+ days same direction)
-   - Net directional premium flow
-4. Build `src/signals/regime.py`:
-   - GaussianHMM with 3 states from hmmlearn
-   - Features: rolling 20-day returns, rolling 20-day realized vol, VIX level
-   - Training: rolling 4-year window
-   - Classification: low_vol_trend, high_vol_trend, range_bound, crisis
-   - Backup: VIX threshold + ADX rules for redundancy
-5. Build `src/signals/gex.py`:
-   - Calculate per-strike gamma exposure from options chain OI + Greeks
-   - Identify Call Wall, Put Wall, Volatility Trigger
-   - Determine positive/negative GEX regime
-6. Build `src/signals/insider.py`:
-   - SEC EDGAR Form 4 XML parser (free, real-time)
-   - Cluster detection: 3+ insiders buying within 30 days
-   - Weight by seniority (CEO/CFO > VP > Director) and dollar amount
-   - Filter out 10b5-1 plan trades
-7. Build `src/signals/vrp.py`:
-   - Calculate IV − RV spread (implied minus realized vol)
-   - IV Rank and IV Percentile calculation
-   - VRP regime: rich (IV >> RV), fair, cheap (IV << RV)
-8. Build `src/signals/cross_asset.py`:
-   - FRED API: 2Y/10Y spread, Fed funds rate, HY OAS (BAMLH0A0HYM2)
-   - VIX term structure: VIX/VIX3M ratio
-   - DXY, copper/gold ratio from Polygon
-9. Build `src/signals/ensemble.py`:
-   - Collect calibrated outputs from all 4 streams
-   - XGBoost meta-learner
-   - Isotonic regression calibration
-   - Output: final confidence score 0.0–1.0
-   - Trade signal only when score > CONFIDENCE_THRESHOLD (0.78)
-10. Build `src/ml/features.py`:
-    - Full feature engineering pipeline
-    - Feature selection via importance thresholding (> 0.5%)
-    - Standardization/normalization as needed
-11. Build `src/ml/trainer.py`:
-    - Walk-forward training loop
-    - Purged k-fold cross-validation (5 folds, 5-day embargo)
-    - Model serialization to /models directory
-12. Build `src/ml/calibration.py`:
-    - Isotonic regression calibration wrapper
-    - Calibration curve visualization
+### Alpha Signals Ranked by Evidence
 
-### Phase 4: AI Agents (Day 4)
-1. Build `src/ai/prompts.py`:
-   - Analysis Agent system prompt (cacheable, detailed with all strategy rules)
-   - Risk Agent system prompt (portfolio limits, circuit breaker rules)
-   - Execution Agent system prompt (IBKR order types, combo construction)
-   - Journal Agent system prompt (trade review criteria, pattern detection)
-2. Build `src/ai/analysis_agent.py`:
-   - Claude API call with extended thinking enabled
-   - Input: ML scores, regime, GEX, sentiment, news headlines, options chain snapshot
-   - Output: Structured JSON — {ticker, strategy, direction, confidence, parameters, reasoning}
-   - Thinking budget: configurable via env var
-3. Build `src/ai/risk_agent.py`:
-   - Evaluates Analysis Agent proposals
-   - Checks all risk limits
-   - Returns: APPROVED, REJECTED (with reason), MODIFIED (with adjustments)
-4. Build `src/ai/execution_agent.py`:
-   - Translates approved proposals to IBKR combo orders
-   - Monitors fill status
-   - Handles partial fills and order modifications
-5. Build `src/ai/journal_agent.py`:
-   - Batch API calls (50% discount) for end-of-day
-   - Reviews all closed trades
-   - FinMem memory: short (5 trades), medium (30 trades), long (regime patterns)
-   - Generates insights for Analysis Agent system prompt updates
-6. Build `src/ai/agents.py`:
-   - LangGraph state machine orchestrating all 4 agents
-   - Conditional routing: Analysis → Risk (approve?) → Execution
-   - Error handling and retries
-   - Fallback: if Claude API unavailable, fall back to pure ML signals
+| Tier | Signal | Evidence | Annual Alpha |
+|------|--------|----------|--------------|
+| **Tier 1 (Proven)** | VRP Harvesting | IV overestimates RV 85–90% of time | 3–5 vol points edge |
+| **Tier 1 (Proven)** | Insider Cluster Buying | Academic: 3+ insiders in 30 days | 22–32% annualized |
+| **Tier 1 (Proven)** | GEX Analysis | Mechanical support/resistance from dealer hedging | Regime-dependent |
+| **Tier 2 (Filters)** | VIX Term Structure | Contango/backwardation | Market timing |
+| **Tier 2 (Filters)** | Cross-Asset | HY OAS, copper/gold, DXY | Risk-on/risk-off |
+| **Tier 3 (Marginal)** | Dark Pool | Large block trades | Confirmation only |
 
-### Phase 5: Infrastructure (Day 5)
-1. Build `src/notifications/telegram.py`:
-   - Trade entry/exit messages with P&L
-   - Daily summary: trades, P&L, drawdown, regime
-   - Circuit breaker alerts
-   - Command handlers: /status, /positions, /kill (emergency stop)
-2. Build `src/notifications/twilio_sms.py`:
-   - SMS for: connectivity loss > 5 min, circuit breaker trigger, emergency stop
-   - Rate limit: max 1 SMS per condition per hour
-3. Build `src/notifications/reporter.py`:
-   - Weekly QuantStats HTML tear sheet generation
-   - Monthly PDF report
-   - Send via Telegram as file attachment
-4. Build `src/utils/metrics.py`:
-   - Prometheus metrics: trade_count, win_rate, avg_pnl, drawdown_pct, api_latency, regime_state, confidence_score, positions_open
-   - Expose on port 8080 via FastAPI
-5. Build Grafana dashboard JSON:
-   - P&L curve (PostgreSQL query)
-   - Open positions table with Greeks
-   - Regime state indicator
-   - ML confidence distribution
-   - Circuit breaker status
-   - System health (CPU, memory, API latency from Prometheus)
-6. Build `src/utils/scheduling.py`:
-   - APScheduler-based task scheduling
-   - Market open scan (9:35 AM ET)
-   - Intraday scans (every 2 hours: 11:30, 1:30, 3:30)
-   - Position exit checks (every 15 minutes during market hours)
-   - End-of-day journal (4:15 PM ET)
-   - Weekly model retraining (Saturday 6 AM ET)
-   - Earnings/event calendar refresh (daily 8 AM ET)
+### ML Accuracy Expectations
 
-### Phase 6: Advanced ML (Day 6)
-1. Build `src/ml/optimizer.py`:
-   - Optuna walk-forward optimization
-   - Parameters: entry thresholds, DTE targets, delta targets, profit targets, stop loss levels
-   - Multi-objective: maximize Sharpe + minimize max drawdown
-   - PostgreSQL-backed study storage
-2. Build `src/ml/online.py`:
-   - River online learning for real-time model updates
-   - ADWIN drift detection on strategy error rates
-   - Trigger actions: log warning → increase LR → reset weights → full retrain
-3. Build `src/ml/rl_agent.py`:
-   - SAC via Stable-Baselines3
-   - State: price, portfolio value, Greeks, IV, time to expiry, VIX, regime
-   - Action: scale factor [-1, +1]
-   - Reward: Sharpe over rolling 20-trade window
-   - Training: offline on historical trade outcomes
-4. Build `src/ml/backtest.py`:
-   - Options-specific backtesting engine
-   - Realistic fill modeling: mid price + 10–25% of spread as slippage
-   - Multi-leg execution simulation
-   - Walk-forward validation framework
+Be realistic — these are researched baselines from `/docs/Research-2.md`:
+
+- **Unfiltered directional accuracy**: 53–60% (this is normal, not a bug)
+- **Confidence-filtered (>0.78)**: 70–85% accuracy at ~12% coverage
+- **Goal**: High selectivity, not high coverage. 3–5 trades/week is the target.
 
 ---
 
-## CODING STANDARDS — ENFORCE THESE EVERYWHERE
+## CODING STANDARDS
 
-### Python Style
-- **Type hints everywhere** — every function signature, every return type
-- **Pydantic models** for all data structures (trade signals, orders, positions)
+### Python Style (Enforced Everywhere)
+
+- **Type hints** on every function signature and return type
+- **Pydantic models** for all data structures (trade signals, orders, positions, API responses)
 - **Async/await** for all I/O operations (IBKR, databases, APIs, Redis)
-- **Structured logging** via structlog — JSON format with timestamp, level, component, message
-- **Error handling**: specific exceptions, never bare `except:`. Use `tenacity` for retries
+- **Structured logging** via `structlog` — JSON format with timestamp, level, component, message
+- **Error handling**: specific exceptions, never bare `except:`. Use `tenacity` for retries with exponential backoff
 - **No global state** — dependency injection via constructor parameters
 - **Docstrings** on every public method — describe what it does, parameters, returns
-- **Constants** in UPPER_CASE, never magic numbers in code
-- **Configuration** always from environment or YAML — never hardcoded
+- **Constants** in `UPPER_CASE`, never magic numbers in code
+- **Configuration** always from environment (`.env`) or YAML — never hardcoded values
 
 ### Architecture Patterns
+
 - **Event-driven**: Redis Pub/Sub for market data distribution, Redis Streams for order events
 - **Repository pattern** for database access (separate data access from business logic)
-- **Strategy pattern** for the 10 options strategies (common interface, different implementations)
+- **Strategy pattern** for the 10 options strategies (common interface via `base.py`)
 - **Observer pattern** for position monitoring (strategies observe their positions)
 - **Circuit breaker pattern** for external API calls (Anthropic, Polygon, Finnhub)
 
-### Testing
+### Testing Requirements
+
 - Unit tests for all strategy logic (entry criteria, exit rules, sizing)
 - Integration tests for IBKR connectivity (paper account)
-- Mock external APIs in tests (httpx mock)
-- Minimum coverage: strategy logic 90%, risk logic 95%
+- Mock external APIs in tests (`httpx` mock, `respx`, or `pytest-httpx`)
+- Minimum coverage targets: strategy logic 90%, risk logic 95%
+- Run tests: `uv run pytest tests/ -v --tb=short`
 
 ---
 
-## DATABASE SCHEMAS
+## KEY TECHNICAL SPECIFICATIONS
 
-### PostgreSQL Tables
+### IB Gateway / ib_async
 
-```sql
--- Trades table
-CREATE TABLE trades (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    ticker VARCHAR(10) NOT NULL,
-    strategy VARCHAR(50) NOT NULL,
-    direction VARCHAR(10) NOT NULL,  -- LONG, SHORT
-    status VARCHAR(20) NOT NULL DEFAULT 'PENDING',  -- PENDING, OPEN, CLOSED, CANCELLED
-    entry_time TIMESTAMPTZ,
-    exit_time TIMESTAMPTZ,
-    entry_price DECIMAL(10,4),
-    exit_price DECIMAL(10,4),
-    quantity INTEGER NOT NULL,
-    max_profit DECIMAL(10,2),
-    max_loss DECIMAL(10,2),
-    realized_pnl DECIMAL(10,2),
-    commission DECIMAL(10,2),
-    ml_confidence DECIMAL(5,4),
-    regime VARCHAR(30),
-    entry_iv_rank DECIMAL(5,2),
-    entry_reasoning TEXT,  -- Claude's analysis
-    exit_reasoning TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+- **ib_async** is the successor to `ib_insync` — always use `ib_async`, not the old library
+- **ONE session per IBKR username** — never log into Client Portal or TWS while bot is running
+- **Daily reset**: IB Gateway restarts 00:15–01:45 ET — bot must handle automatic reconnection
+- **Rate limit**: 50 messages/second. Batch requests, use `asyncio.sleep(0.05)` between rapid calls
+- **Max 100 concurrent streaming data lines** (increases with commissions/equity)
+- **Options chain pipeline**: `reqSecDefOptParams()` (no rate limit) → filter strikes (±20 points) → `qualifyContracts()` → `reqMktData()` with Greeks on tick types 10–13
+- **Combo/BAG orders**: set `NonGuaranteed = "0"` for guaranteed fills, **always use limit orders**
+- **Error codes**: 502/504 (not connected), 1100 (connectivity lost), 1102 (restored), 2104/2106/2158 (data farm connections)
+- **Order Efficiency Ratio**: must stay below 20:1 (submitted / filled)
 
--- Trade legs table (for multi-leg spreads)
-CREATE TABLE trade_legs (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    trade_id UUID REFERENCES trades(id),
-    leg_type VARCHAR(10) NOT NULL,  -- BUY, SELL
-    option_type VARCHAR(4) NOT NULL,  -- CALL, PUT
-    strike DECIMAL(10,2) NOT NULL,
-    expiry DATE NOT NULL,
-    quantity INTEGER NOT NULL,
-    fill_price DECIMAL(10,4),
-    ib_order_id INTEGER,
-    ib_con_id INTEGER,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+### Claude API
 
--- Account snapshots
-CREATE TABLE account_snapshots (
-    id BIGSERIAL PRIMARY KEY,
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    net_liquidation DECIMAL(12,2),
-    buying_power DECIMAL(12,2),
-    excess_liquidity DECIMAL(12,2),
-    realized_pnl_day DECIMAL(10,2),
-    unrealized_pnl DECIMAL(10,2),
-    total_positions INTEGER,
-    regime VARCHAR(30)
-);
+- **Prompt caching**: system prompts are static — mark with `cache_control: {"type": "ephemeral"}` for 90% cost savings
+- **Extended thinking**: minimum 1024 tokens, set budget via `thinking.budget_tokens` (Analysis: 16K, Risk: 8K)
+- **Batch API**: use `/v1/messages/batches` for Journal Agent — 50% cost discount
+- **Error handling**: exponential backoff for 429 (rate limit) and 529 (overloaded)
+- **Fallback**: if Claude API is unreachable for >2 minutes, fall back to pure ML signal-based trading
+- **Cost estimate**: ~$0.01/call using Sonnet + prompt caching
 
--- Circuit breaker state
-CREATE TABLE circuit_breaker_state (
-    id SERIAL PRIMARY KEY,
-    level VARCHAR(20) NOT NULL,  -- NORMAL, CAUTION, WARNING, HALT, EMERGENCY
-    triggered_at TIMESTAMPTZ,
-    daily_pnl DECIMAL(10,2),
-    weekly_pnl DECIMAL(10,2),
-    monthly_pnl DECIMAL(10,2),
-    total_drawdown_pct DECIMAL(5,4),
-    high_water_mark DECIMAL(12,2),
-    recovery_stage INTEGER DEFAULT 0,  -- 0=normal, 1=50%, 2=75%, 3=100%
-    consecutive_winners INTEGER DEFAULT 0,
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
+### Options Formulas (Get These Right)
 
--- ML model metadata
-CREATE TABLE model_versions (
-    id SERIAL PRIMARY KEY,
-    model_name VARCHAR(50) NOT NULL,
-    version INTEGER NOT NULL,
-    trained_at TIMESTAMPTZ DEFAULT NOW(),
-    train_start DATE,
-    train_end DATE,
-    val_accuracy DECIMAL(5,4),
-    val_sharpe DECIMAL(6,3),
-    features_json JSONB,
-    hyperparams_json JSONB,
-    model_path VARCHAR(255),
-    is_active BOOLEAN DEFAULT FALSE
-);
+```
+IV Rank = (Current_IV − 52wk_Low_IV) / (52wk_High_IV − 52wk_Low_IV)
 
--- Agent decisions log
-CREATE TABLE agent_decisions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    timestamp TIMESTAMPTZ DEFAULT NOW(),
-    agent VARCHAR(30) NOT NULL,  -- ANALYSIS, RISK, EXECUTION, JOURNAL
-    trade_id UUID REFERENCES trades(id),
-    decision VARCHAR(20) NOT NULL,  -- RECOMMEND, APPROVE, REJECT, MODIFY, EXECUTE
-    reasoning TEXT,
-    confidence DECIMAL(5,4),
-    thinking_tokens INTEGER,
-    latency_ms INTEGER,
-    cost_usd DECIMAL(6,4)
-);
+IV Percentile = % of days in past year where IV was below current level
 
-CREATE INDEX idx_trades_status ON trades(status);
-CREATE INDEX idx_trades_ticker ON trades(ticker);
-CREATE INDEX idx_trades_strategy ON trades(strategy);
-CREATE INDEX idx_trades_entry_time ON trades(entry_time);
-CREATE INDEX idx_account_snapshots_ts ON account_snapshots(timestamp);
-CREATE INDEX idx_agent_decisions_ts ON agent_decisions(timestamp);
+GEX = Σ(call_OI × call_gamma × 100 × spot) − Σ(put_OI × put_gamma × 100 × spot)
+
+Bull Call Spread Max Loss = Net Debit Paid
+Bull Call Spread Max Profit = (Long Strike − Short Strike) − Net Debit
+
+Iron Condor Max Loss = Wider Wing Width − Net Credit Received
+Iron Condor Max Profit = Net Credit Received
+
+Kelly Fraction = (p × b − q) / b
+    where p = win probability, q = 1−p, b = avg_win / avg_loss
+    USE FRACTIONAL KELLY: f* = Kelly / 4 (quarter-Kelly for safety)
 ```
 
-### QuestDB Tables (Time-Series)
+### Database Design
 
-```sql
--- Market data ticks
-CREATE TABLE IF NOT EXISTS market_ticks (
-    timestamp TIMESTAMP,
-    ticker SYMBOL,
-    bid DOUBLE,
-    ask DOUBLE,
-    last DOUBLE,
-    volume LONG,
-    iv DOUBLE,
-    delta DOUBLE,
-    gamma DOUBLE,
-    theta DOUBLE,
-    vega DOUBLE
-) TIMESTAMP(timestamp) PARTITION BY DAY;
+**PostgreSQL** (relational — trades, state, models):
+- Schema defined in `scripts/init_db.sql`
+- Tables: `trades`, `trade_legs`, `account_snapshots`, `circuit_breaker_state`, `model_versions`, `agent_decisions`
+- All state that must survive restarts lives here
 
--- GEX levels
-CREATE TABLE IF NOT EXISTS gex_levels (
-    timestamp TIMESTAMP,
-    ticker SYMBOL,
-    spot_price DOUBLE,
-    net_gex DOUBLE,
-    call_wall DOUBLE,
-    put_wall DOUBLE,
-    vol_trigger DOUBLE,
-    regime SYMBOL
-) TIMESTAMP(timestamp) PARTITION BY DAY;
+**QuestDB** (time-series — market data, signals):
+- Tables: `market_ticks`, `gex_levels`, `signal_scores`
+- Partitioned by DAY for efficient time-range queries
+- 12–36x faster than InfluxDB for time-series workloads
 
--- Signal scores
-CREATE TABLE IF NOT EXISTS signal_scores (
-    timestamp TIMESTAMP,
-    ticker SYMBOL,
-    technical_score DOUBLE,
-    sentiment_score DOUBLE,
-    flow_score DOUBLE,
-    regime_score DOUBLE,
-    ensemble_score DOUBLE,
-    confidence DOUBLE
-) TIMESTAMP(timestamp) PARTITION BY DAY;
-```
+**Redis** (cache + messaging):
+- Data caching with TTL (market data, API responses)
+- Pub/Sub for real-time market data distribution
+- Streams for order event processing
+- 512MB max memory with `allkeys-lru` eviction
 
 ---
 
-## MAIN APPLICATION ENTRY POINT (src/main.py)
+## APPLICATION LIFECYCLE
 
-The main application must:
-1. Load all configuration from environment and YAML
-2. Initialize all database connections (PostgreSQL, QuestDB, Redis)
-3. Connect to IB Gateway with health monitoring
-4. Load trained ML models (or train from scratch if none exist)
-5. Initialize regime detector, signal generators, strategy selector
-6. Initialize Claude AI agents (with fallback to pure ML if API unavailable)
-7. Set up APScheduler with all scheduled tasks
-8. Start the event loop:
-   - Stream market data via ib_async
-   - Process signals on schedule
-   - Evaluate trade opportunities
-   - Execute approved trades
-   - Monitor open positions for exits
-   - Track P&L and risk metrics
-   - Export Prometheus metrics
-9. Handle graceful shutdown (close positions? → NO, just disconnect cleanly)
-10. Expose FastAPI health endpoint on port 8080
-
-### Application Lifecycle
 ```
 STARTUP:
-  → Load config
-  → Connect databases
-  → Connect IB Gateway (retry until connected)
-  → Load/train ML models
-  → Initialize agents
-  → Start schedulers
+  → Load config from .env + YAML files
+  → Connect databases (PostgreSQL, QuestDB, Redis)
+  → Connect IB Gateway (retry with exponential backoff until connected)
+  → Load trained ML models (or train from scratch if /models/ is empty)
+  → Initialize regime detector, signal generators, strategy selector
+  → Initialize Claude AI agents (with fallback to pure ML if API unavailable)
+  → Start APScheduler with all scheduled tasks
   → Begin market data streaming
-  → Log "TITAN ONLINE" to Telegram
+  → Send "TITAN ONLINE" to Telegram
 
-MARKET HOURS (9:30 AM - 4:00 PM ET):
+MARKET HOURS (9:30 AM – 4:00 PM ET):
   → 9:35 AM: Full universe scan (regime + signals + strategy selection)
   → Every 15 min: Check open positions for exit criteria
   → 11:30 AM, 1:30 PM, 3:30 PM: Intraday opportunity scans
-  → Continuous: Circuit breaker monitoring, risk metric updates
+  → Continuous: Circuit breaker monitoring, risk metric updates, Prometheus export
 
 AFTER HOURS:
-  → 4:15 PM: Journal Agent reviews all trades
+  → 4:15 PM: Journal Agent reviews all trades (Batch API for 50% discount)
   → 4:30 PM: Daily P&L summary to Telegram
   → 5:00 PM: Update signal databases, cache cleanup
-  → Saturday 6 AM: Weekly model retraining + Optuna optimization
+  → Saturday 6:00 AM: Weekly model retraining + Optuna optimization
 
 SHUTDOWN:
-  → Cancel all pending orders
+  → Cancel all pending orders (DO NOT close open positions)
   → Disconnect from IB Gateway cleanly
   → Flush all database writes
-  → Log "TITAN OFFLINE" to Telegram
+  → Send "TITAN OFFLINE" to Telegram
 ```
 
 ---
 
-## CRITICAL IMPLEMENTATION NOTES
+## ENVIRONMENT VARIABLES
 
-### IB Gateway Specifics
-- **ib_async** is the successor to ib_insync — use it, not the old library
-- Only ONE session per IBKR username — never log into Client Portal or TWS while bot is running
-- IB Gateway resets daily 00:15–01:45 ET — bot must handle reconnection
-- Rate limit: 50 messages/second. Batch requests, use `sleep(0.05)` between rapid calls
-- Max 100 concurrent streaming data lines (increases with commissions/equity)
-- Options chains: call `reqSecDefOptParams()` first (no rate limit), then filter strikes before requesting data
-- Combo/BAG orders: set `NonGuaranteed = "0"` for guaranteed fills, always use limit orders
-- Error codes to handle: 502 (not connected), 504 (not connected), 1100 (connectivity lost), 1102 (restored), 2104/2106/2158 (data farm connections)
-- Order Efficiency Ratio must stay below 20:1 (submitted÷filled)
+All configuration is loaded via `config/settings.py` (Pydantic BaseSettings). See `.env.example` for the full template. Critical variables:
 
-### Claude API Specifics
-- Use prompt caching: system prompt is static, mark with `cache_control: {"type": "ephemeral"}`
-- Extended thinking: minimum 1024 tokens, set budget via `thinking.budget_tokens`
-- Batch API: set `custom_id` and use `/v1/messages/batches` endpoint for Journal Agent
-- Error handling: implement exponential backoff for 429 (rate limit) and 529 (overloaded)
-- Fallback: if Claude API is unreachable for > 2 minutes, fall back to pure ML signal-based trading (no agent reasoning)
+```bash
+# IBKR (CRITICAL — connects to real broker)
+IBKR_USERNAME, IBKR_PASSWORD, IBKR_TRADING_MODE (paper|live), IBKR_GATEWAY_PORT (4001=live, 4002=paper)
 
-### Options Trading Specifics
-- IV Rank = (Current IV − 52-week Low IV) ÷ (52-week High IV − 52-week Low IV)
-- IV Percentile = % of days in past year where IV was below current level
-- GEX = Σ(call_OI × call_gamma × 100 × spot) − Σ(put_OI × put_gamma × 100 × spot)
-- Bull call spread max loss = net debit paid
-- Iron condor max loss = wider wing width − net credit received
-- Always use monthly expirations for better liquidity (not weeklies)
-- Close spreads before expiration — never hold through expiry
+# Databases
+POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+QUESTDB_HOST, QUESTDB_HTTP_PORT, QUESTDB_PG_PORT
+REDIS_HOST, REDIS_PORT
+
+# API Keys (each from a different provider)
+ANTHROPIC_API_KEY, POLYGON_API_KEY, UNUSUAL_WHALES_API_KEY, FINNHUB_API_KEY, QUIVER_API_KEY, FRED_API_KEY
+
+# Notifications
+TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, TWILIO_TO_NUMBER
+
+# Trading Parameters
+ACCOUNT_SIZE=150000, MAX_DRAWDOWN_PCT=0.15, PER_TRADE_RISK_PCT=0.02, MAX_CONCURRENT_POSITIONS=8, CONFIDENCE_THRESHOLD=0.78
+
+# Claude AI
+CLAUDE_MODEL=claude-sonnet-4-6, CLAUDE_ANALYSIS_THINKING_BUDGET=16384, CLAUDE_RISK_THINKING_BUDGET=8192
+```
 
 ---
 
-## REMEMBER
+## DOCKER COMPOSE
 
-- **No placeholders.** Every function must be fully implemented.
-- **No TODO comments.** If something needs doing, do it now.
-- **No mock data in production code.** Use real API calls everywhere.
-- **Test with paper trading first.** Use IBKR_TRADING_MODE=paper.
-- **Log everything.** Every trade decision, every API call, every error.
-- **The bot must survive restarts.** All state persists to PostgreSQL.
-- **Circuit breakers are sacred.** They NEVER get overridden.
+The full `docker-compose.yml` orchestrates 7 services:
+
+| Service | Image | Ports | Purpose |
+|---------|-------|-------|---------|
+| `ib-gateway` | `ghcr.io/gnzsnz/ib-gateway:latest` | 4001, 4002, 5900 | IBKR API + VNC debug |
+| `redis` | `redis:7-alpine` | 6379 | Cache + messaging |
+| `postgres` | `postgres:16` | 5432 | Relational data |
+| `questdb` | `questdb/questdb:latest` | 9000, 8812, 9009 | Time-series data |
+| `titan` | Built from `Dockerfile` | 8080 | The trading bot |
+| `prometheus` | `prom/prometheus:latest` | 9090 | Metrics collection |
+| `grafana` | `grafana/grafana:latest` | 3000 | Dashboards |
+
+All ports are bound to `127.0.0.1` (localhost only) for security. The titan service waits for all dependencies to be healthy before starting.
+
+---
+
+## OPERATIONAL COSTS
+
+| Service | Monthly Cost | Notes |
+|---------|-------------|-------|
+| Polygon.io | $199 | Advanced tier (real-time, options, dark pool) |
+| Unusual Whales | $50–75 | API add-on required |
+| Claude API | $50–100 | With prompt caching (90% savings) |
+| Quiver Quantitative | $10–25 | Congressional, insider, lobbying data |
+| IBKR Data | $6–16 | Often waived with commissions |
+| Twilio | ~$5 | SMS alerts only |
+| VPS (future) | $60–100 | QuantVPS NY or Hetzner Ashburn |
+| **Total** | **~$380–520** | **ROI: 5% monthly = $7,500 vs ~$450 costs** |
+
+---
+
+## DEBUGGING & TROUBLESHOOTING
+
+### Check Logs First
+
+```bash
+# Application logs (if running locally)
+tail -f logs/titan.log
+
+# Docker container logs
+docker compose logs -f titan
+docker compose logs -f ib-gateway
+docker compose logs -f postgres
+
+# Check all service health
+docker compose ps
+
+# Redis connectivity
+docker compose exec redis redis-cli ping
+
+# PostgreSQL connectivity
+docker compose exec postgres pg_isready -U titan
+
+# QuestDB health
+curl http://localhost:9000/
+```
+
+### Common Issues
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| "Not connected" (502/504) | IB Gateway not running or in daily restart | Check `docker compose logs ib-gateway`, wait for 00:15–01:45 ET reset |
+| "Connectivity lost" (1100) | Network interruption | Bot auto-reconnects; check 1102 (restored) in logs |
+| No options data | Missing market data subscription | Verify IBKR market data subscriptions in Account Management |
+| Claude API 429 | Rate limited | Exponential backoff handles this; check if budget exceeded |
+| Circuit breaker fired | Drawdown threshold hit | This is WORKING AS DESIGNED. Do NOT override. Check recovery ladder. |
+| Empty ML predictions | No trained models | Run `uv run python scripts/train_models.py` or let main.py auto-train |
+
+---
+
+## CRITICAL REMINDERS
+
+1. **Every function must be fully implemented.** No stubs. No pass statements in production code.
+2. **Every error must be logged with full context** — timestamp, component, error type, relevant trade/ticker/order data.
+3. **Circuit breakers are SACRED.** They are the difference between a bad week and account liquidation.
+4. **Test with paper trading first.** Always `IBKR_TRADING_MODE=paper` until you've validated everything.
+5. **The bot must survive restarts.** All critical state persists to PostgreSQL. On restart, it picks up where it left off.
+6. **Close spreads before expiration.** Never hold through expiry — pin risk and assignment risk are real.
+7. **Always use limit orders.** Never market orders on spreads. Slippage on market orders for multi-leg trades is brutal.
+8. **Monthly expirations only.** Better liquidity and tighter spreads than weeklies.
+9. **Fallback is mandatory.** If Claude API is down, pure ML signals must keep the system operational.
+10. **Log everything, measure everything.** If it's not in Prometheus or PostgreSQL, it didn't happen.
+
+**The bot that survives its worst day is worth more than the bot that performs best on its best day.**
 
 Build this system to be the most intelligent, reliable, and profitable options trading bot ever created. The operator's livelihood depends on it.
+
+---
+
+## AUDIT STATUS (Last Updated: 2026-02-24)
+
+### Verified Correct
+
+The following critical formulas and systems have been forensically audited and verified:
+
+| Component | File | Status |
+|-----------|------|--------|
+| IV Rank formula | `technical.py:770`, `vrp.py:228` | Correct, div-by-zero protected |
+| IV Percentile formula | `technical.py:803`, `vrp.py:287` | Correct |
+| GEX formula | `gex.py:313` | Correct, algebraically matches spec |
+| VRP formula | `vrp.py:172` | Correct (IV - RV) |
+| Kelly criterion (quarter-Kelly) | `position_sizer.py:366-383` | Correct, capped at 0.25 |
+| Position sizing (`math.floor`) | `position_sizer.py:279` | Correct, never rounds up |
+| Circuit breaker state machine | `circuit_breakers.py` | Correct: escalates only, never auto-de-escalates |
+| High water mark tracking | `circuit_breakers.py:155-160` | Correct |
+| Tail risk composite weights | `tail_risk.py:123-127` | Sum to 1.0, correct |
+| Isotonic calibration placement | `ensemble.py:282-283` | After XGBoost, before threshold |
+| Confidence threshold (>=0.78) | `ensemble.py:493` | Correct per "minimum" spec wording |
+| GaussianHMM 3-state + 4-year window | `regime.py:142, 245-247` | Correct |
+| VIX > 35 crisis override | `regime.py:345-347` | Now unconditional in predict() |
+| Insider cluster (3+ in 30 days) | `insider.py:69, 72, 337-351` | Correct, excludes 10b5-1 |
+| Vol/OI >= 1.25 + sweep detection | `options_flow.py:46, 327, 346-363` | Correct |
+| FinBERT model | `sentiment.py:153` | ProsusAI/finbert confirmed |
+| Risk VETO enforcement | `risk_agent.py:788-919` | No bypass path exists |
+| LangGraph pipeline | `agents.py:734` | START->analyze->risk->(execute or reject) |
+| Prompt caching on all agents | All agent files | cache_control ephemeral confirmed |
+| ML fallback (2-min timeout) | `agents.py:65, 852-918` | Correct implementation |
+| Journal Agent batch API | `journal_agent.py:301-430` | 50% discount path confirmed |
+| Walk-forward training | `trainer.py:205-350` | Genuine temporal splits with embargo |
+| ADWIN drift detection | `online.py:815` | Wired into online learning loop |
+| Backtester slippage | `backtest.py:1005-1100` | 15% of spread (within 10-25% spec) |
+| Earnings exclusion window | `event_calendar.py:493-516` | 5 days before through 1 day after |
+
+### Known Limitations (Acceptable for Phase 1)
+
+These items are documented, understood, and acceptable for paper trading. Address before live trading:
+
+1. **`min_recovery_days` loaded but never enforced** in `circuit_breakers.py:99` — the cooling period config is read but not referenced in recovery advancement logic.
+
+2. **Market holidays hardcoded for 2025-2026 only** in `helpers.py:39-63` — must be updated annually.
+
+3. **Test coverage is 0% for actual `src/` modules** — the 37 existing tests validate math formulas only, not the classes themselves. Test directories exist but are empty.
+
+### Fixes Applied in This Audit (2026-02-24)
+
+| Fix | File | Description |
+|-----|------|-------------|
+| Circuit breaker bypass | `manager.py:647` | Removed `await` on sync method, unpacked tuple to fix truthiness check |
+| Event calendar method | `manager.py:674` | Changed non-existent `get_blocking_event()` to `is_blocked()` |
+| VIX crisis override | `regime.py:345` | Added unconditional VIX > 35 crisis regime override in `predict()` |
+| Agent model fallbacks | `agents.py:656-720` | Updated model from `claude-sonnet-4-5-20250929` to `claude-sonnet-4-6` |
+| Analysis thinking budget | `agents.py:661` | Fixed fallback from 8192 to 16384 |
+| Risk thinking budget | `agents.py:684` | Fixed fallback from 4096 to 8192 |
+| Docker port mapping | `docker-compose.yml:16` | Fixed `4002:4004` to `4002:4002` |
+| IB Gateway health check | `docker-compose.yml:21` | Changed port 4004 to 4002 |
+| HWM seed value | `init_db.sql:139` | Changed from 0.00 to 150000.00 |
+| QuestDB flush error handling | `questdb.py:191` | Added try/except for TCP write failures |
+| QuestDB connect retry | `questdb.py:136` | Added exponential backoff retry (5 attempts) |
+| Scheduler Prometheus metrics | `scheduling.py:361-372` | Wired SCHEDULER_JOB_DURATION and SCHEDULER_JOB_ERRORS |
+| Circuit breaker async lock | `circuit_breakers.py:113` | Added asyncio.Lock to protect concurrent state modifications |
+| CB level validation | `circuit_breakers.py:413` | Validate loaded level against BreakerLevel enum |
+| Sentiment blocking call | `sentiment.py:252` | Wrapped FinBERT inference in `run_in_executor` |
+| Telegram deprecation | `telegram.py:576` | Changed `get_event_loop()` to `get_running_loop()` |
+| Position sizer min-1 | `position_sizer.py:281` | Removed dangerous minimum-1 contract override |
+| CB default to HALT | `circuit_breakers.py:384` | Default to HALT when DB unreachable on startup |
+| PnL reset wiring | `scheduling.py, main.py` | Wired daily/weekly/monthly PnL reset jobs |
+| Earnings window | `risk_limits.yaml` | Changed days_before from 3 to 5 |
+| Redis graceful degradation | `cache.py` | Added try/except to all Redis operations |
+| Position check implementation | `main.py` | Implemented actual DTE/profit/stoploss exit criteria evaluation |
+| Trade submission lock | `main.py` | Added asyncio.Lock to prevent overlapping scan race conditions |
+| Telegram /kill wiring | `telegram.py, main.py` | Wired /kill CONFIRM to TitanApplication.request_kill() |
+| Ticker+strategy dedup | `manager.py` | Added composite dedup check in position limits |
+| Strategy constructors (7) | `calendar_spread.py`, `diagonal_spread.py`, `broken_wing_butterfly.py`, `short_strangle.py`, `pmcc.py`, `ratio_spread.py`, `long_straddle.py` | Fixed `__init__(config)` to `__init__(name, config)` and `super().__init__(config)` to `super().__init__(name, config)`, removed redundant `@property name` overrides |
+| Signal pipeline | `main.py:1530-1800` | Implemented full `_run_signal_pipeline()`: spot price fetch, parallel signal gathering (sentiment, flow, insider, cross-asset), regime detection, VRP, ensemble scoring, confidence gate, AI orchestrator routing with fallback |
+| Order status polling | `execution_agent.py:1008-1095` | Implemented `_poll_order_status()`: queries OrderManager for live Trade objects, maps ib_async status strings to canonical states (FILLED/CANCELLED/REJECTED/PARTIAL/PENDING), extracts fill price/qty/time |
+| Orchestrator → OrderManager | `agents.py:607, 697` | Added `order_manager` parameter pass-through from orchestrator to ExecutionAgent |

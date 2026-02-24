@@ -249,7 +249,13 @@ class SentimentAnalyzer:
         texts = [h["headline"] for h in headlines]
         timestamps = [h["timestamp"] for h in headlines]
 
-        sentiment_scores = self._score_texts(texts, timestamps)
+        loop = asyncio.get_running_loop()
+        sentiment_scores = await loop.run_in_executor(
+            None,
+            self._score_texts,
+            texts,
+            timestamps,
+        )
 
         rolling = self._calculate_rolling_sentiment(sentiment_scores)
 

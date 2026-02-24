@@ -10,7 +10,7 @@ Usage::
 
     from src.ai.execution_agent import ExecutionAgent
 
-    agent = ExecutionAgent(api_key="sk-ant-...", model="claude-sonnet-4-5-20250929")
+    agent = ExecutionAgent(api_key="sk-ant-...", model="claude-sonnet-4-6")
     plan = await agent.plan_execution(proposal)
     order = agent.build_order_from_plan(plan)
     result = await agent.monitor_execution(order_id=12345, timeout_seconds=60)
@@ -222,11 +222,20 @@ class ExecutionAgent:
     Args:
         api_key: Anthropic API key.
         model: Claude model identifier for API calls.
+        order_manager: Optional :class:`~src.broker.orders.OrderManager`
+            for live order status polling.  When ``None``, order status
+            polling returns a static ``PENDING`` response.
     """
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        order_manager: Any | None = None,
+    ) -> None:
         self._client: AsyncAnthropic = AsyncAnthropic(api_key=api_key)
         self._model: str = model
+        self._order_manager: Any | None = order_manager
         self._log: structlog.stdlib.BoundLogger = get_logger("ai.execution_agent")
 
     # ------------------------------------------------------------------
@@ -1006,19 +1015,95 @@ class ExecutionAgent:
         return "\n".join(parts) if parts else ""
 
     async def _poll_order_status(self, order_id: int) -> dict[str, Any]:
-        """Poll the current status of an order.
+        """Poll the current status of an order from IBKR.
 
-        In production this method interfaces with
-        :class:`~src.broker.orders.OrderManager` to retrieve live
-        order status from IB Gateway.  The current implementation
-        returns a pending status -- the real integration is wired
-        up when the full broker module is connected.
+        Queries the :class:`~src.broker.orders.OrderManager` for the
+        live Trade object matching *order_id*, then maps the ib_async
+        order-status string to the polling contract expected by
+        :meth:`monitor_execution`.
 
         Args:
             order_id: IBKR order identifier.
 
         Returns:
-            Dict with ``status`` and optional fill details.
+            Dict with ``status`` key and optional fill details
+            (``fill_price``, ``filled_qty``, ``fill_time``,
+            ``expected_price``, ``reason``).
         """
         self._log.debug("polling_order_status", order_id=order_id)
-        return {"status": "PENDING", "order_id": order_id}
+
+        if self._order_manager is None:
+            return {"status": "PENDING", "order_id": order_id}
+
+        # ib_async status strings → our canonical statuses
+        status_map: dict[str, str] = {
+            "Submitted": "PENDING",
+            "PreSubmitted": "PENDING",
+            "PendingSubmit": "PENDING",
+            "PendingCancel": "PENDING",
+            "ApiPending": "PENDING",
+            "Filled": "FILLED",
+            "Cancelled": "CANCELLED",
+            "ApiCancelled": "CANCELLED",
+            "Inactive": "REJECTED",
+        }
+
+        try:
+            open_trades = self._order_manager.get_open_orders()
+            # Also check filled trades via ib_async
+            all_trades = open_trades
+            if hasattr(self._order_manager, "_ib"):
+                all_trades = list(self._order_manager._ib.trades())
+
+            for trade in all_trades:
+                if trade.order.orderId == order_id:
+                    ib_status = trade.orderStatus.status
+                    canonical = status_map.get(ib_status, "PENDING")
+
+                    result: dict[str, Any] = {
+                        "status": canonical,
+                        "order_id": order_id,
+                    }
+
+                    if canonical == "FILLED":
+                        avg_price = trade.orderStatus.avgFillPrice
+                        result["fill_price"] = avg_price
+                        result["filled_qty"] = int(trade.orderStatus.filled)
+                        # Use expected price from order manager if tracked
+                        if hasattr(self._order_manager, "_expected_prices"):
+                            result["expected_price"] = (
+                                self._order_manager._expected_prices.get(
+                                    order_id,
+                                    avg_price,
+                                )
+                            )
+                        # Capture fill time from the last fill event
+                        if trade.fills:
+                            last_fill = trade.fills[-1]
+                            result["fill_time"] = str(last_fill.time)
+
+                    elif canonical == "CANCELLED":
+                        result["reason"] = f"Order cancelled (IB status: {ib_status})"
+
+                    elif canonical == "REJECTED":
+                        result["reason"] = (
+                            f"Order rejected/inactive (IB status: {ib_status})"
+                        )
+
+                    elif ib_status == "Filled" and trade.orderStatus.remaining > 0:
+                        result["status"] = "PARTIAL"
+                        result["filled_qty"] = int(trade.orderStatus.filled)
+
+                    return result
+
+            # Order not found in current trades — may have already
+            # been cleaned up or is from a previous session.
+            self._log.warning(
+                "order_not_found_in_trades",
+                order_id=order_id,
+            )
+            return {"status": "PENDING", "order_id": order_id}
+
+        except Exception:
+            self._log.exception("poll_order_status_error", order_id=order_id)
+            return {"status": "PENDING", "order_id": order_id}

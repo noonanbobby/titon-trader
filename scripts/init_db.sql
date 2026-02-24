@@ -136,7 +136,7 @@ CREATE INDEX idx_agent_decisions_trade_id ON agent_decisions(trade_id);
 -- Insert initial circuit breaker state (NORMAL level)
 -- =============================================================================
 INSERT INTO circuit_breaker_state (level, daily_pnl, weekly_pnl, monthly_pnl, total_drawdown_pct, high_water_mark, recovery_stage, consecutive_winners)
-VALUES ('NORMAL', 0.00, 0.00, 0.00, 0.0000, 0.00, 0, 0);
+VALUES ('NORMAL', 0.00, 0.00, 0.00, 0.0000, 150000.00, 0, 0);
 
 -- =============================================================================
 -- Function to auto-update updated_at timestamp on trades

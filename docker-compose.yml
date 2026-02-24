@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   ib-gateway:
     image: ghcr.io/gnzsnz/ib-gateway:latest
@@ -8,18 +6,19 @@ services:
       TWS_USERID: ${IBKR_USERNAME}
       TWS_PASSWORD: ${IBKR_PASSWORD}
       TRADING_MODE: ${IBKR_TRADING_MODE:-paper}
-      TWS_SETTINGS_PATH: /root/Jts
+      TWS_SETTINGS_PATH: /home/ibgateway/Jts
       TWOFA_TIMEOUT_ACTION: restart
       AUTO_RESTART_TIME: "23:45"
       RELOGIN_AFTER_2FA_TIMEOUT: "yes"
+      IBC_AcceptIncomingConnectionAction: accept
     ports:
       - "127.0.0.1:4001:4001"
       - "127.0.0.1:4002:4002"
       - "127.0.0.1:5900:5900"
     volumes:
-      - ib-gateway-settings:/root/Jts
+      - ib-gateway-settings:/home/ibgateway/Jts
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "${IBKR_GATEWAY_PORT:-4002}"]
+      test: ["CMD", "nc", "-z", "localhost", "4002"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -69,10 +68,11 @@ services:
     environment:
       QDB_HTTP_ENABLED: "true"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/"]
+      test: ["CMD-SHELL", "echo > /dev/tcp/localhost/9000"]
       interval: 10s
-      timeout: 3s
-      retries: 3
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   titan:
     build:
@@ -81,7 +81,8 @@ services:
     restart: unless-stopped
     depends_on:
       ib-gateway:
-        condition: service_healthy
+        condition: service_started
+        required: false
       redis:
         condition: service_healthy
       postgres:
@@ -116,8 +117,10 @@ services:
       - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
-      GF_INSTALL_PLUGINS: grafana-clock-panel
+      GF_PLUGINS_PREINSTALL: grafana-clock-panel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
+      - ./config/grafana/grafana.ini:/etc/grafana/grafana.ini
       - ./config/grafana/provisioning:/etc/grafana/provisioning
       - grafana-data:/var/lib/grafana
     depends_on:

@@ -1445,7 +1445,7 @@ class OptionsBacktester:
             # For debit positions: profit when current > entry
             # For credit positions: profit when |current| < |entry|
             position.unrealized_pnl = round(
-                total_entry_value - total_current_value,
+                total_current_value - total_entry_value,
                 2,
             )
 
@@ -1573,9 +1573,8 @@ class OptionsBacktester:
         realized_pnl = position.unrealized_pnl - exit_commission
         position.realized_pnl = round(realized_pnl, 2)
 
-        # Update equity
+        # Update equity (commission already included in realized_pnl)
         self._equity += realized_pnl
-        self._equity -= exit_commission
 
         self._closed_positions.append(position)
 
@@ -1669,6 +1668,27 @@ class OptionsBacktester:
             return False
 
         return True
+
+    # ------------------------------------------------------------------
+    # Reset
+    # ------------------------------------------------------------------
+
+    def _reset(self) -> None:
+        """Reset all mutable state for a fresh backtest run.
+
+        Called at the start of :meth:`run` so that the same
+        :class:`OptionsBacktester` instance can be reused for
+        multiple independent backtests.
+        """
+        self._open_positions = []
+        self._closed_positions = []
+        self._equity = self._config.initial_capital
+        self._high_water_mark = self._equity
+        self._equity_curve = []
+        self._daily_returns = []
+        self._signals_received = 0
+        self._signals_rejected = 0
+        self._peak_concurrent = 0
 
     # ------------------------------------------------------------------
     # Data extraction helpers

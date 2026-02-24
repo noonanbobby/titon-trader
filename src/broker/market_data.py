@@ -706,6 +706,72 @@ class MarketDataManager:
 
         return snapshot
 
+    async def get_historical_bars(
+        self,
+        ticker: str,
+        duration: str = "100 D",
+        bar_size: str = "1 day",
+    ) -> pd.DataFrame | None:
+        """Fetch historical OHLCV bars from IB Gateway.
+
+        Args:
+            ticker: Underlying symbol (e.g. ``"AAPL"``).
+            duration: IB duration string (e.g. ``"100 D"``, ``"2 Y"``).
+            bar_size: IB bar size string (e.g. ``"1 day"``).
+
+        Returns:
+            A :class:`pd.DataFrame` with columns ``['open', 'high',
+            'low', 'close', 'volume']`` indexed by date, or ``None`` on
+            failure.
+        """
+        try:
+            contract = await self._factory.create_stock(ticker)
+        except ValueError:
+            self._log.warning("hist_bars_qualify_failed", ticker=ticker)
+            return None
+
+        try:
+            bars = await self._ib.reqHistoricalDataAsync(
+                contract=contract,
+                endDateTime="",
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow="TRADES",
+                useRTH=True,
+                formatDate=1,
+                keepUpToDate=False,
+                timeout=30,
+            )
+        except Exception:
+            self._log.exception("historical_bars_request_failed", ticker=ticker)
+            return None
+
+        if not bars:
+            self._log.warning("historical_bars_empty", ticker=ticker)
+            return None
+
+        records: list[dict[str, Any]] = []
+        for bar in bars:
+            bar_date = bar.date
+            if isinstance(bar_date, datetime):
+                bar_date = bar_date.date()
+            records.append(
+                {
+                    "date": bar_date,
+                    "open": _safe_float(bar.open, 0.0),
+                    "high": _safe_float(bar.high, 0.0),
+                    "low": _safe_float(bar.low, 0.0),
+                    "close": _safe_float(bar.close, 0.0),
+                    "volume": int(getattr(bar, "volume", 0) or 0),
+                }
+            )
+
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df = df.sort_values("date").set_index("date")
+
+        return df
+
     async def get_historical_iv(
         self,
         ticker: str,

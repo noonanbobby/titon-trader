@@ -232,11 +232,13 @@ class AgentState(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 
-class AnalysisInput(BaseModel):
-    """Input payload for the Analysis Agent.
+class PipelineAnalysisInput(BaseModel):
+    """Input payload for the Analysis Agent pipeline.
 
     Aggregates all market context needed for Claude to reason about
-    potential trade opportunities.
+    potential trade opportunities.  This is the orchestrator-side model;
+    it is translated into :class:`~src.ai.analysis_agent.AnalysisInput`
+    before being passed to the Analysis Agent.
     """
 
     ticker: str = Field(
@@ -284,6 +286,10 @@ class AnalysisInput(BaseModel):
     event_calendar: dict[str, Any] = Field(
         default_factory=dict,
         description="Upcoming earnings, FOMC, CPI events",
+    )
+    memory_context: str = Field(
+        default="",
+        description="FinMem context with recent outcomes and regime patterns",
     )
 
 
@@ -608,9 +614,13 @@ class TradingAgentOrchestrator:
         self,
         api_key: str,
         settings: Any,
+        order_manager: Any | None = None,
+        db_pool: Any | None = None,
     ) -> None:
         self._api_key: str = api_key
         self._settings: Any = settings
+        self._order_manager: Any | None = order_manager
+        self._db_pool: Any | None = db_pool
         self._log: structlog.stdlib.BoundLogger = get_logger(
             "ai.orchestrator",
         )
@@ -626,6 +636,9 @@ class TradingAgentOrchestrator:
         self._risk_agent: Any = None
         self._execution_agent: Any = None
         self._journal_agent: Any = None
+
+        # FinMem layered memory system
+        self._memory: Any = None
 
         self._init_agents()
         self._log.info(
@@ -653,12 +666,12 @@ class TradingAgentOrchestrator:
                 model=getattr(
                     self._settings,
                     "claude_model",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4-6",
                 ),
                 thinking_budget=getattr(
                     self._settings,
                     "claude_analysis_thinking_budget",
-                    8192,
+                    16384,
                 ),
             )
             self._log.info("analysis_agent_loaded")
@@ -676,12 +689,12 @@ class TradingAgentOrchestrator:
                 model=getattr(
                     self._settings,
                     "claude_model",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4-6",
                 ),
                 thinking_budget=getattr(
                     self._settings,
                     "claude_risk_thinking_budget",
-                    4096,
+                    8192,
                 ),
             )
             self._log.info("risk_agent_loaded")
@@ -699,8 +712,9 @@ class TradingAgentOrchestrator:
                 model=getattr(
                     self._settings,
                     "claude_model",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4-6",
                 ),
+                order_manager=self._order_manager,
             )
             self._log.info("execution_agent_loaded")
         except ImportError:
@@ -717,13 +731,25 @@ class TradingAgentOrchestrator:
                 model=getattr(
                     self._settings,
                     "claude_model",
-                    "claude-sonnet-4-5-20250929",
+                    "claude-sonnet-4-6",
                 ),
             )
             self._log.info("journal_agent_loaded")
         except ImportError:
             self._log.warning(
                 "journal_agent_not_available",
+                reason="module not found",
+            )
+
+        # FinMem layered memory system
+        try:
+            from src.ai.memory import FinMemory
+
+            self._memory = FinMemory()
+            self._log.info("finmem_loaded")
+        except ImportError:
+            self._log.warning(
+                "finmem_not_available",
                 reason="module not found",
             )
 
@@ -949,7 +975,18 @@ class TradingAgentOrchestrator:
             if self._analysis_agent is not None and not state.get(
                 "fallback_mode", False
             ):
-                analysis_input = AnalysisInput(
+                # Fetch FinMem context for the current regime
+                memory_context = ""
+                if self._memory is not None:
+                    try:
+                        regime = state.get("regime", "unknown")
+                        memory_context = await self._memory.get_context_for_analysis(
+                            regime
+                        )
+                    except Exception:
+                        self._log.warning("finmem_context_fetch_failed")
+
+                analysis_input = PipelineAnalysisInput(
                     ticker=state.get("ticker", ""),
                     ml_scores=_safe_get_dict(state, "ml_scores"),
                     regime=state.get("regime", "unknown"),
@@ -975,6 +1012,7 @@ class TradingAgentOrchestrator:
                         state,
                         "event_calendar",
                     ),
+                    memory_context=memory_context,
                 )
 
                 raw_proposals = await self._call_analysis_agent(
@@ -1375,6 +1413,40 @@ class TradingAgentOrchestrator:
             )
             entry = self._create_mechanical_journal(closed_trades)
 
+        # Feed trade outcomes into FinMem layered memory
+        if self._memory is not None:
+            try:
+                from src.ai.memory import TradeMemory
+
+                for trade in closed_trades:
+                    trade_mem = TradeMemory(
+                        ticker=str(trade.get("ticker", "?")),
+                        strategy=str(trade.get("strategy", "unknown")),
+                        direction=str(trade.get("direction", "LONG")),
+                        entry_date=str(trade.get("entry_time", "")),
+                        exit_date=str(trade.get("exit_time", "")),
+                        pnl=float(trade.get("realized_pnl", 0.0)),
+                        regime=str(trade.get("regime", "unknown")),
+                        confidence=float(trade.get("ml_confidence", 0.0)),
+                        grade=str(
+                            entry.insights[0].get("grade", "C")
+                            if entry.insights
+                            else "C"
+                        ),
+                        lessons=[
+                            str(i.get("lesson", ""))
+                            for i in entry.insights
+                            if i.get("ticker") == trade.get("ticker")
+                        ][:3],
+                    )
+                    await self._memory.add_trade(trade_mem)
+                self._log.info(
+                    "finmem_updated",
+                    trades_stored=len(closed_trades),
+                )
+            except Exception:
+                self._log.exception("finmem_update_failed")
+
         elapsed = time.monotonic() - start_time
         AGENT_LATENCY.labels(agent="journal").observe(elapsed)
 
@@ -1403,14 +1475,18 @@ class TradingAgentOrchestrator:
     )
     async def _call_analysis_agent(
         self,
-        analysis_input: AnalysisInput,
+        analysis_input: PipelineAnalysisInput,
     ) -> list[dict[str, Any]]:
         """Call the Analysis Agent with retry logic.
+
+        Translates the pipeline-level :class:`PipelineAnalysisInput`
+        into the agent-level :class:`~src.ai.analysis_agent.AnalysisInput`
+        before invoking Claude.
 
         Parameters
         ----------
         analysis_input:
-            Structured input for the analysis agent.
+            Structured input from the orchestrator pipeline.
 
         Returns
         -------
@@ -1424,11 +1500,38 @@ class TradingAgentOrchestrator:
         ConnectionError
             If the Claude API is unreachable.
         """
-        with API_LATENCY.labels(api="claude_analysis").time():
-            result = await self._analysis_agent.analyze(
-                analysis_input.model_dump(),
-            )
+        from src.ai.analysis_agent import AnalysisInput as AgentAnalysisInput
 
+        # Summarise the options chain into key stats for the agent prompt
+        chain_summary: dict[str, Any] = {}
+        if analysis_input.options_chain:
+            chain_summary = {
+                "num_contracts": len(analysis_input.options_chain),
+                "sample": analysis_input.options_chain[:5],
+            }
+
+        agent_input = AgentAnalysisInput(
+            ticker=analysis_input.ticker,
+            ml_confidence=analysis_input.ml_scores.get("confidence", 0.0),
+            regime=analysis_input.regime,
+            iv_rank=analysis_input.iv_rank,
+            sentiment_score=analysis_input.sentiment_score,
+            gex_regime=analysis_input.gex_data.get("regime", "neutral"),
+            options_chain_summary=chain_summary,
+            account_equity=analysis_input.account_summary.get(
+                "net_liquidation",
+                150_000.0,
+            ),
+            current_positions=analysis_input.current_positions,
+            memory_context=analysis_input.memory_context,
+        )
+
+        with API_LATENCY.labels(api="claude_analysis").time():
+            result = await self._analysis_agent.analyze(agent_input)
+
+        # AnalysisResult has a .proposals list of TradeProposal Pydantic models
+        if hasattr(result, "proposals"):
+            return [p.model_dump() for p in result.proposals]
         if isinstance(result, dict):
             return [result]
         if isinstance(result, list):

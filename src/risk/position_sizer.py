@@ -278,10 +278,17 @@ class PositionSizer:
         # Step 7: Convert to contracts.
         contracts = int(math.floor(dollar_risk / max_loss_per_contract))
 
-        # Step 8: Minimum 1 contract if trading is permitted, max capped.
-        if cb_factor > 0.0 and contracts < 1 and dollar_risk > 0.0:
-            contracts = 1
-            dollar_risk = max_loss_per_contract
+        # Step 8: Reject trade if risk per contract exceeds allowable risk.
+        # Never force 1 contract when max_loss_per_contract > dollar_risk —
+        # that would exceed the per-trade risk budget.
+        if contracts < 1:
+            self._log.warning(
+                "position_size_zero_contracts",
+                dollar_risk=round(dollar_risk, 2),
+                max_loss_per_contract=round(max_loss_per_contract, 2),
+                reason="spread too wide for current risk budget",
+            )
+            contracts = 0
 
         # Ensure dollar_risk is consistent with the actual contract count.
         actual_dollar_risk = contracts * max_loss_per_contract

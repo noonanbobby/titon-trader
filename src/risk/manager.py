@@ -29,7 +29,9 @@ Usage::
 from __future__ import annotations
 
 import math
+from datetime import datetime, time
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 
@@ -41,6 +43,20 @@ if TYPE_CHECKING:
 
     from config.settings import Settings
     from src.strategies.base import TradeSignal
+
+# ---------------------------------------------------------------------------
+# Market hours constants
+# ---------------------------------------------------------------------------
+
+_US_EASTERN = ZoneInfo("America/New_York")
+_MARKET_OPEN_BUFFER_END = time(9, 45)  # No entries before 9:45 ET
+_MARKET_CLOSE_BUFFER_START = time(15, 45)  # No entries after 3:45 ET
+_MARKET_OPEN = time(9, 30)
+_MARKET_CLOSE = time(16, 0)
+
+# Dollar-denominated portfolio Greek limits (beta_weighted net_delta / net_vega)
+_MAX_PORTFOLIO_DELTA_DOLLARS: float = 15000.0  # delta_limit: $15000 max
+_MAX_PORTFOLIO_VEGA_DOLLARS: float = 5000.0  # vega_limit: $5000 max
 
 # ---------------------------------------------------------------------------
 # Verdict constants
@@ -130,6 +146,10 @@ class PortfolioExposure(BaseModel):
     positions_by_sector: dict[str, int] = Field(
         default_factory=dict,
         description="Position count by sector",
+    )
+    positions_by_ticker_strategy: dict[str, int] = Field(
+        default_factory=dict,
+        description="Position count by ticker:strategy composite key",
     )
     total_delta: float = Field(
         default=0.0,
@@ -508,6 +528,59 @@ class RiskManager:
                 risk_score=0.6,
             )
 
+        # ── Layer 8: Portfolio delta dollars ────────────────────────────
+        delta_ok, delta_reason = self._check_portfolio_delta_dollars(
+            signal, portfolio, account_equity
+        )
+        if not delta_ok:
+            self._log.warning(
+                "trade_rejected_portfolio_delta_dollars",
+                ticker=ticker,
+                strategy=strategy,
+                reason=delta_reason,
+            )
+            return RiskVerdict(
+                verdict=VERDICT_REJECTED,
+                reason=f"Portfolio delta $: {delta_reason}",
+                original_quantity=original_qty,
+                approved_quantity=0,
+                risk_score=0.85,
+            )
+
+        # ── Layer 9: Portfolio vega dollars ────────────────────────────
+        vega_ok, vega_reason = self._check_portfolio_vega_dollars(signal, portfolio)
+        if not vega_ok:
+            self._log.warning(
+                "trade_rejected_portfolio_vega_dollars",
+                ticker=ticker,
+                strategy=strategy,
+                reason=vega_reason,
+            )
+            return RiskVerdict(
+                verdict=VERDICT_REJECTED,
+                reason=f"Portfolio vega $: {vega_reason}",
+                original_quantity=original_qty,
+                approved_quantity=0,
+                risk_score=0.85,
+            )
+
+        # ── Layer 10: Market hours filter ──────────────────────────────
+        hours_ok, hours_reason = self._check_market_hours()
+        if not hours_ok:
+            self._log.warning(
+                "trade_rejected_market_hours",
+                ticker=ticker,
+                strategy=strategy,
+                reason=hours_reason,
+            )
+            return RiskVerdict(
+                verdict=VERDICT_REJECTED,
+                reason=f"Market hours: {hours_reason}",
+                original_quantity=original_qty,
+                approved_quantity=0,
+                risk_score=0.3,
+            )
+
         # ── All checks passed ─────────────────────────────────────────
         # Compute composite risk score (average of all factors, capped at 1).
         if risk_factors:
@@ -569,13 +642,10 @@ class RiskManager:
         Returns:
             Tuple of (is_allowed, reason_if_blocked).
         """
-        is_allowed = await self._circuit_breaker.is_trading_allowed()
-        if not is_allowed:
+        allowed, reason_msg, size_mult = self._circuit_breaker.is_trading_allowed()
+        if not allowed:
             level = getattr(self._circuit_breaker, "current_level", "UNKNOWN")
-            reason = (
-                f"Trading halted at circuit breaker level {level}. "
-                f"No new positions permitted."
-            )
+            reason = f"Trading halted at circuit breaker level {level}: {reason_msg}"
             return False, reason
         return True, ""
 
@@ -596,15 +666,9 @@ class RiskManager:
         Returns:
             Tuple of (is_allowed, reason_if_blocked).
         """
-        blocking_event = await self._event_calendar.get_blocking_event(ticker)
-        if blocking_event is not None:
-            event_type = blocking_event.get("event_type", "unknown")
-            event_date = blocking_event.get("event_date", "unknown")
-            reason = (
-                f"Ticker {ticker} blocked by upcoming {event_type} "
-                f"event on {event_date}"
-            )
-            return False, reason
+        is_blocked, block_reason = self._event_calendar.is_blocked(ticker)
+        if is_blocked:
+            return False, block_reason
         return True, ""
 
     # ------------------------------------------------------------------
@@ -668,6 +732,16 @@ class RiskManager:
                 False,
                 f"Maximum positions for sector '{sector}' reached "
                 f"({sector_count}/{self._max_positions_per_sector})",
+            )
+
+        # Duplicate ticker+strategy check — prevent opening the same
+        # strategy on the same ticker twice (e.g. two bull_call_spread on AAPL).
+        ticker_strategy_key = f"{ticker}:{strategy}"
+        if portfolio.positions_by_ticker_strategy.get(ticker_strategy_key, 0) > 0:
+            return (
+                False,
+                f"Duplicate trade blocked: {ticker} already has an "
+                f"active '{strategy}' position",
             )
 
         self._log.debug(
@@ -1030,6 +1104,140 @@ class RiskManager:
         return True, ""
 
     # ------------------------------------------------------------------
+    # Layer 8: Portfolio delta dollars (beta-weighted)
+    # ------------------------------------------------------------------
+
+    def _check_portfolio_delta_dollars(
+        self,
+        signal: TradeSignal,
+        portfolio: PortfolioExposure,
+        account_equity: float,
+    ) -> tuple[bool, str]:
+        """Check if portfolio delta in dollar terms exceeds the $15K limit.
+
+        Beta-weighted portfolio delta exposure is approximated as
+        ``total_delta * 100`` (each delta point ≈ $100 of SPY-equivalent
+        exposure for a standard equity option).  This is a conservative
+        approximation; a full beta-weighted calculation requires per-position
+        beta data.
+
+        Args:
+            signal: The proposed trade signal.
+            portfolio: Current portfolio exposure snapshot.
+            account_equity: Current net liquidation value.
+
+        Returns:
+            Tuple of (is_within_limit, reason_if_exceeded).
+        """
+        trade_delta = getattr(signal, "delta", 0.0)
+        quantity = getattr(signal, "quantity", 1)
+        projected_delta = portfolio.total_delta + (trade_delta * quantity)
+
+        # Approximate dollar delta: each delta point * contract multiplier
+        delta_dollars = abs(projected_delta) * 100.0
+
+        if delta_dollars > _MAX_PORTFOLIO_DELTA_DOLLARS:
+            return (
+                False,
+                f"Projected portfolio delta ${delta_dollars:,.0f} exceeds "
+                f"limit of ${_MAX_PORTFOLIO_DELTA_DOLLARS:,.0f} "
+                f"(current delta: {portfolio.total_delta:.1f}, "
+                f"trade adds: {trade_delta * quantity:.1f})",
+            )
+
+        self._log.debug(
+            "portfolio_delta_dollars_ok",
+            projected_delta_dollars=round(delta_dollars, 2),
+            limit=_MAX_PORTFOLIO_DELTA_DOLLARS,
+        )
+        return True, ""
+
+    # ------------------------------------------------------------------
+    # Layer 9: Portfolio vega dollars
+    # ------------------------------------------------------------------
+
+    def _check_portfolio_vega_dollars(
+        self,
+        signal: TradeSignal,
+        portfolio: PortfolioExposure,
+    ) -> tuple[bool, str]:
+        """Check if portfolio vega in dollar terms exceeds the $5K limit.
+
+        Net vega exposure is computed as ``total_vega * 100`` (each vega
+        point represents a $100 change per 1% move in IV for a standard
+        equity option contract).
+
+        Args:
+            signal: The proposed trade signal.
+            portfolio: Current portfolio exposure snapshot.
+
+        Returns:
+            Tuple of (is_within_limit, reason_if_exceeded).
+        """
+        trade_vega = getattr(signal, "vega", 0.0)
+        quantity = getattr(signal, "quantity", 1)
+        projected_vega = portfolio.total_vega + abs(trade_vega * quantity)
+
+        vega_dollars = projected_vega * 100.0
+
+        if vega_dollars > _MAX_PORTFOLIO_VEGA_DOLLARS:
+            return (
+                False,
+                f"Projected portfolio vega ${vega_dollars:,.0f} exceeds "
+                f"limit of ${_MAX_PORTFOLIO_VEGA_DOLLARS:,.0f} "
+                f"(current vega: {portfolio.total_vega:.1f}, "
+                f"trade adds: {abs(trade_vega * quantity):.1f})",
+            )
+
+        self._log.debug(
+            "portfolio_vega_dollars_ok",
+            projected_vega_dollars=round(vega_dollars, 2),
+            limit=_MAX_PORTFOLIO_VEGA_DOLLARS,
+        )
+        return True, ""
+
+    # ------------------------------------------------------------------
+    # Layer 10: Market hours filter
+    # ------------------------------------------------------------------
+
+    def _check_market_hours(self) -> tuple[bool, str]:
+        """Reject entries during the first 15 and last 15 minutes of trading.
+
+        The opening 15 minutes (9:30–9:45 ET) are dominated by overnight
+        order imbalances and erratic price action.  The closing 15 minutes
+        (3:45–4:00 ET) carry MOC (Market-On-Close) order imbalance risk
+        and widening spreads.
+
+        Returns:
+            Tuple of (is_within_hours, reason_if_blocked).
+        """
+        now_et = datetime.now(tz=_US_EASTERN)
+        current_time = now_et.time()
+
+        # Outside market hours entirely — allow (the scheduler should
+        # handle this, but if called outside hours let other checks decide).
+        if current_time < _MARKET_OPEN or current_time >= _MARKET_CLOSE:
+            return True, ""
+
+        # Opening buffer: 9:30–9:45 ET
+        if current_time < _MARKET_OPEN_BUFFER_END:
+            return (
+                False,
+                f"Opening buffer: no entries before 9:45 ET "
+                f"(current time: {current_time.strftime('%H:%M:%S')} ET)",
+            )
+
+        # Closing buffer: 3:45–4:00 ET
+        if current_time >= _MARKET_CLOSE_BUFFER_START:
+            return (
+                False,
+                f"Closing buffer: no entries after 3:45 ET "
+                f"(current time: {current_time.strftime('%H:%M:%S')} ET)",
+            )
+
+        return True, ""
+
+    # ------------------------------------------------------------------
     # Portfolio exposure aggregation
     # ------------------------------------------------------------------
 
@@ -1058,6 +1266,7 @@ class RiskManager:
         by_ticker: dict[str, int] = {}
         by_strategy: dict[str, int] = {}
         by_sector: dict[str, int] = {}
+        by_ticker_strategy: dict[str, int] = {}
 
         total_delta: float = 0.0
         total_gamma: float = 0.0
@@ -1074,6 +1283,10 @@ class RiskManager:
             by_ticker[ticker] = by_ticker.get(ticker, 0) + 1
             by_strategy[strategy] = by_strategy.get(strategy, 0) + 1
             by_sector[sector] = by_sector.get(sector, 0) + 1
+
+            # Track ticker:strategy composite for duplicate trade prevention
+            ts_key = f"{ticker}:{strategy}"
+            by_ticker_strategy[ts_key] = by_ticker_strategy.get(ts_key, 0) + 1
 
             total_delta += float(pos.get("delta", 0.0)) * quantity
             total_gamma += abs(float(pos.get("gamma", 0.0)) * quantity)
@@ -1093,6 +1306,7 @@ class RiskManager:
             positions_by_ticker=by_ticker,
             positions_by_strategy=by_strategy,
             positions_by_sector=by_sector,
+            positions_by_ticker_strategy=by_ticker_strategy,
             total_delta=round(total_delta, 4),
             total_gamma=round(total_gamma, 4),
             total_theta=round(total_theta, 4),

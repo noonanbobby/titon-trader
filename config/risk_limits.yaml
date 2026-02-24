@@ -124,7 +124,7 @@ correlation:
 # Block new entries near high-impact events.
 event_exclusions:
   earnings:
-    days_before: 3                # no new entries 3 days before earnings
+    days_before: 5                # no new entries 5 days before earnings
     days_after: 1                 # no new entries 1 day after earnings
     close_before: true            # close existing positions before earnings
     close_before_days: 1          # close 1 day before earnings

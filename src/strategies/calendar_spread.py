@@ -14,7 +14,7 @@ Usage::
     from src.strategies.base import StrategyConfig
 
     config = StrategyConfig(...)
-    strategy = CalendarSpread(config)
+    strategy = CalendarSpread("calendar_spread", config)
     signal = await strategy.check_entry("AAPL", 175.0, 35.0, "range_bound",
                                          greeks, options_chain)
 """
@@ -59,11 +59,15 @@ BACK_MONTH_MAX_DTE: int = 90
 ATM_DELTA_MIN: float = 0.45
 ATM_DELTA_MAX: float = 0.55
 
-# Exit thresholds
-PROFIT_TARGET_PCT: float = 0.25
+# Exit thresholds — per specification:
+# 1. Close at 50% of max profit
+# 2. Close if underlying moves > 1 std dev from strike
+# 3. Close when front-month DTE <= 5 (approaching expire / front-month expiry)
+PROFIT_TARGET_PCT: float = 0.50
 STOP_LOSS_PCT: float = 0.50
-FRONT_MONTH_DTE_EXIT: int = 7
+FRONT_MONTH_DTE_EXIT: int = 5
 UNDERLYING_MOVE_EXIT_PCT: float = 0.05
+STD_DEV_EXIT_MULTIPLIER: float = 1.0  # 1 standard deviation
 
 # Calendar spreads are typically entered with puts for a neutral stance
 DEFAULT_RIGHT: str = "P"
@@ -96,18 +100,8 @@ class CalendarSpread(BaseStrategy):
         - Underlying moves more than 5% from the entry strike.
     """
 
-    def __init__(self, config: StrategyConfig) -> None:
-        super().__init__(config)
-        self._log = get_logger(f"strategy.{self.name}")
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def name(self) -> str:
-        """Return the canonical strategy name."""
-        return "calendar_spread"
+    def __init__(self, name: str, config: StrategyConfig) -> None:
+        super().__init__(name, config)
 
     # ------------------------------------------------------------------
     # Entry
@@ -387,27 +381,40 @@ class CalendarSpread(BaseStrategy):
                 urgency=3,
             )
 
-        # 3. Underlying moved too far from entry strike
+        # 3. Underlying moved > 1 standard deviation from entry strike
         entry_strike = self._get_entry_strike(trade)
         if entry_strike is not None and entry_strike > 0:
-            move_pct = abs(spot_price - entry_strike) / entry_strike
-            if move_pct > UNDERLYING_MOVE_EXIT_PCT:
+            # Use realised volatility from greeks to estimate 1 std dev move
+            # If IV (vega proxy) is available, estimate annualised vol
+            iv_estimate = getattr(greeks, "implied_vol", None)
+            if iv_estimate and iv_estimate > 0 and dte_remaining > 0:
+                # Daily std dev = IV * sqrt(DTE/252) * spot
+                daily_std = iv_estimate * (dte_remaining / 252) ** 0.5 * entry_strike
+                move_threshold = daily_std * STD_DEV_EXIT_MULTIPLIER
+            else:
+                # Fallback: use percentage-based threshold
+                move_threshold = entry_strike * UNDERLYING_MOVE_EXIT_PCT
+
+            price_move = abs(spot_price - entry_strike)
+            if price_move > move_threshold:
+                move_pct = price_move / entry_strike
                 self._log.info(
-                    "exit_underlying_move",
+                    "exit_underlying_move_std_dev",
                     trade_id=str(trade.id),
                     ticker=trade.ticker,
                     spot_price=spot_price,
                     entry_strike=entry_strike,
+                    price_move=round(price_move, 2),
+                    move_threshold=round(move_threshold, 2),
                     move_pct=round(move_pct, 4),
-                    threshold=UNDERLYING_MOVE_EXIT_PCT,
                 )
                 return ExitSignal(
                     trade_id=trade.id,
                     reason=ExitReason.STRATEGY_SPECIFIC,
                     details=(
-                        f"Underlying moved {move_pct:.1%} from entry strike "
-                        f"${entry_strike:.2f} "
-                        f"(threshold {UNDERLYING_MOVE_EXIT_PCT:.0%}). "
+                        f"Underlying moved ${price_move:.2f} from entry strike "
+                        f"${entry_strike:.2f} (>{STD_DEV_EXIT_MULTIPLIER:.0f} std dev "
+                        f"threshold ${move_threshold:.2f}). "
                         f"Current price ${spot_price:.2f}."
                     ),
                     urgency=3,
@@ -540,6 +547,77 @@ class CalendarSpread(BaseStrategy):
             Maximum loss in dollars (positive value, per spread unit).
         """
         return round(abs(net_premium) * 100.0, 2)
+
+    # ------------------------------------------------------------------
+    # Order construction & Greeks
+    # ------------------------------------------------------------------
+
+    async def construct_order(
+        self,
+        signal: TradeSignal,
+        contract_factory: Any,
+    ) -> Any:
+        """Build an IBKR combo order from the trade signal legs.
+
+        Args:
+            signal: The approved trade signal with leg specifications.
+            contract_factory: A :class:`ContractFactory` instance for building
+                IBKR combo contracts.
+
+        Returns:
+            An IBKR ``Contract`` object representing the multi-leg spread.
+        """
+        legs_for_broker: list[dict[str, Any]] = []
+        for leg in signal.legs:
+            expiry = leg.expiry
+            if hasattr(expiry, "strftime"):
+                expiry = expiry.strftime("%Y%m%d")
+            legs_for_broker.append(
+                {
+                    "action": leg.action,
+                    "expiry": expiry,
+                    "strike": leg.strike,
+                    "right": leg.right,
+                    "ratio": leg.quantity,
+                }
+            )
+        return await contract_factory.build_spread(
+            ticker=signal.ticker,
+            legs=legs_for_broker,
+        )
+
+    def calculate_greeks(
+        self,
+        legs: list[LegSpec],
+        greeks: dict[str, float],
+    ) -> dict[str, float]:
+        """Aggregate Greeks across all legs of the spread.
+
+        Args:
+            legs: The constructed leg specifications.
+            greeks: Per-leg Greeks keyed by ``strike_right`` identifier.
+
+        Returns:
+            Dictionary with aggregated delta, gamma, theta, vega.
+        """
+        total_delta = 0.0
+        total_gamma = 0.0
+        total_theta = 0.0
+        total_vega = 0.0
+        for leg in legs:
+            multiplier = leg.quantity if leg.action == "BUY" else -leg.quantity
+            key = f"{leg.strike}_{leg.right}"
+            leg_greeks = greeks.get(key, {})
+            total_delta += multiplier * float(leg_greeks.get("delta", 0.0))
+            total_gamma += multiplier * float(leg_greeks.get("gamma", 0.0))
+            total_theta += multiplier * float(leg_greeks.get("theta", 0.0))
+            total_vega += multiplier * float(leg_greeks.get("vega", 0.0))
+        return {
+            "delta": round(total_delta, 6),
+            "gamma": round(total_gamma, 6),
+            "theta": round(total_theta, 6),
+            "vega": round(total_vega, 6),
+        }
 
     # ------------------------------------------------------------------
     # Private helpers

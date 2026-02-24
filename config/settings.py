@@ -42,9 +42,13 @@ class IBKRSettings(BaseSettings):
         default="paper",
         description="Trading mode: 'paper' for simulated, 'live' for real money",
     )
+    gateway_host: str = Field(
+        default="ib-gateway",
+        description="IB Gateway hostname (Docker service name or IP)",
+    )
     gateway_port: int = Field(
-        default=4002,
-        description="IB Gateway API port (4001=live, 4002=paper)",
+        default=4004,
+        description="IB Gateway API port (gnzsnz/ib-gateway paper default)",
     )
     client_id: int = Field(
         default=1,
@@ -229,15 +233,15 @@ class ClaudeAISettings(BaseSettings):
     """Claude AI model and thinking budget configuration."""
 
     claude_model: str = Field(
-        default="claude-sonnet-4-5-20250929",
+        default="claude-sonnet-4-6",
         description="Claude model identifier for API calls",
     )
     claude_analysis_thinking_budget: int = Field(
-        default=8192,
+        default=16384,
         description="Token budget for extended thinking in the Analysis Agent",
     )
     claude_risk_thinking_budget: int = Field(
-        default=4096,
+        default=8192,
         description="Token budget for extended thinking in the Risk Agent",
     )
 

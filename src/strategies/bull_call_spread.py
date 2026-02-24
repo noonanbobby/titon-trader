@@ -515,6 +515,74 @@ class BullCallSpread(BaseStrategy):
         return round(max_loss, 2)
 
     # ------------------------------------------------------------------
+    # Order construction & Greeks
+    # ------------------------------------------------------------------
+
+    async def construct_order(
+        self,
+        signal: TradeSignal,
+        contract_factory: Any,
+    ) -> Any:
+        """Build an IBKR combo order from the trade signal legs.
+
+        Args:
+            signal: The approved trade signal with leg specifications.
+            contract_factory: A :class:`ContractFactory` instance for building
+                IBKR combo contracts.
+
+        Returns:
+            An IBKR ``Contract`` object representing the multi-leg spread.
+        """
+        legs_for_broker: list[dict[str, Any]] = []
+        for leg in signal.legs:
+            legs_for_broker.append(
+                {
+                    "action": leg.action,
+                    "expiry": leg.expiry,
+                    "strike": leg.strike,
+                    "right": leg.right,
+                    "ratio": leg.quantity,
+                }
+            )
+        return await contract_factory.build_spread(
+            ticker=signal.ticker,
+            legs=legs_for_broker,
+        )
+
+    def calculate_greeks(
+        self,
+        legs: list[LegSpec],
+        greeks: dict[str, float],
+    ) -> dict[str, float]:
+        """Aggregate Greeks across all legs of the spread.
+
+        Args:
+            legs: The constructed leg specifications.
+            greeks: Per-leg Greeks keyed by ``strike_right`` identifier.
+
+        Returns:
+            Dictionary with aggregated delta, gamma, theta, vega.
+        """
+        total_delta = 0.0
+        total_gamma = 0.0
+        total_theta = 0.0
+        total_vega = 0.0
+        for leg in legs:
+            multiplier = leg.quantity if leg.action == "BUY" else -leg.quantity
+            key = f"{leg.strike}_{leg.right}"
+            leg_greeks = greeks.get(key, {})
+            total_delta += multiplier * float(leg_greeks.get("delta", 0.0))
+            total_gamma += multiplier * float(leg_greeks.get("gamma", 0.0))
+            total_theta += multiplier * float(leg_greeks.get("theta", 0.0))
+            total_vega += multiplier * float(leg_greeks.get("vega", 0.0))
+        return {
+            "delta": round(total_delta, 6),
+            "gamma": round(total_gamma, 6),
+            "theta": round(total_theta, 6),
+            "vega": round(total_vega, 6),
+        }
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

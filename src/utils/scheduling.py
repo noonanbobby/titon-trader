@@ -31,6 +31,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from src.utils.logging import get_logger
+from src.utils.metrics import SCHEDULER_JOB_DURATION, SCHEDULER_JOB_ERRORS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -65,6 +66,9 @@ JOB_WEEKLY_RETRAIN: str = "weekly_retrain"
 JOB_WEEKLY_REPORT: str = "weekly_report"
 JOB_EVENT_CALENDAR_REFRESH: str = "event_calendar_refresh"
 JOB_MONTHLY_REPORT: str = "monthly_report"
+JOB_DAILY_PNL_RESET: str = "daily_pnl_reset"
+JOB_WEEKLY_PNL_RESET: str = "weekly_pnl_reset"
+JOB_MONTHLY_PNL_RESET: str = "monthly_pnl_reset"
 
 # Position check interval in minutes
 POSITION_CHECK_INTERVAL_MINUTES: int = 15
@@ -229,6 +233,40 @@ _JOB_DEFINITIONS: list[dict[str, Any]] = [
         },
         "description": "Generate monthly performance report",
     },
+    # -- P&L reset jobs (critical for circuit breaker accuracy) --
+    {
+        "name": JOB_DAILY_PNL_RESET,
+        "trigger_type": "cron",
+        "trigger_kwargs": {
+            "day_of_week": WEEKDAYS,
+            "hour": 9,
+            "minute": 29,
+            "timezone": TIMEZONE,
+        },
+        "description": "Reset daily P&L accumulator before market open",
+    },
+    {
+        "name": JOB_WEEKLY_PNL_RESET,
+        "trigger_type": "cron",
+        "trigger_kwargs": {
+            "day_of_week": "mon",
+            "hour": 9,
+            "minute": 29,
+            "timezone": TIMEZONE,
+        },
+        "description": "Reset weekly P&L accumulator on Monday before open",
+    },
+    {
+        "name": JOB_MONTHLY_PNL_RESET,
+        "trigger_type": "cron",
+        "trigger_kwargs": {
+            "day": 1,
+            "hour": 9,
+            "minute": 29,
+            "timezone": TIMEZONE,
+        },
+        "description": "Reset monthly P&L accumulator on 1st of month",
+    },
 ]
 
 
@@ -321,6 +359,8 @@ class TitanScheduler:
             raise
         except Exception:
             elapsed = _time.monotonic() - start
+            SCHEDULER_JOB_ERRORS.labels(job_name=name).inc()
+            SCHEDULER_JOB_DURATION.labels(job_name=name).observe(elapsed)
             logger.exception(
                 "job failed",
                 job_name=name,
@@ -329,6 +369,7 @@ class TitanScheduler:
             return
 
         elapsed = _time.monotonic() - start
+        SCHEDULER_JOB_DURATION.labels(job_name=name).observe(elapsed)
         logger.info(
             "job completed",
             job_name=name,

@@ -156,10 +156,16 @@ class FeatureEngineer:
                 if isinstance(signal_value, (int, float)):
                     ticker_df[f"signal_{signal_name}"] = signal_value
                 elif isinstance(signal_value, str):
-                    # Encode categorical signals (e.g. regime) as dummy codes
-                    ticker_df[f"signal_{signal_name}"] = (
-                        hash(signal_value) % 1000 / 1000.0
+                    # Encode categorical signals (e.g. regime) as
+                    # deterministic numeric codes using hashlib (Python's
+                    # built-in hash() is randomized across sessions).
+                    import hashlib
+
+                    digest = int.from_bytes(
+                        hashlib.sha256(signal_value.encode()).digest()[:4],
+                        "big",
                     )
+                    ticker_df[f"signal_{signal_name}"] = (digest % 1000) / 1000.0
 
             # Add derived cross-features
             ticker_df = self._add_derived_features(ticker_df)

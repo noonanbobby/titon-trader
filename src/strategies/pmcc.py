@@ -31,7 +31,7 @@ Usage::
         stop_loss_pct=0.20,
         max_positions=2,
     )
-    strategy = PoorMansCC(config)
+    strategy = PoorMansCC("pmcc", config)
 """
 
 from __future__ import annotations
@@ -51,7 +51,6 @@ from src.strategies.base import (
     TradeRecord,
     TradeSignal,
 )
-from src.utils.logging import get_logger
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -91,9 +90,8 @@ class PoorMansCC(BaseStrategy):
         config: Strategy configuration from ``config/strategies.yaml``.
     """
 
-    def __init__(self, config: StrategyConfig) -> None:
-        super().__init__(config)
-        self._log = get_logger(f"strategy.{self.name}")
+    def __init__(self, name: str, config: StrategyConfig) -> None:
+        super().__init__(name, config)
 
         # Extract delta ranges from config, falling back to defaults.
         delta_cfg = self._config.delta_range
@@ -154,15 +152,6 @@ class PoorMansCC(BaseStrategy):
             if self._config.roll_short_at_dte is not None
             else _DEFAULT_ROLL_SHORT_AT_DTE
         )
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
-
-    @property
-    def name(self) -> str:
-        """Return the canonical strategy name."""
-        return "pmcc"
 
     # ------------------------------------------------------------------
     # Entry evaluation
@@ -578,6 +567,77 @@ class PoorMansCC(BaseStrategy):
         """
         max_loss = abs(net_premium) * _MULTIPLIER
         return round(max_loss, 2)
+
+    # ------------------------------------------------------------------
+    # Order construction & Greeks
+    # ------------------------------------------------------------------
+
+    async def construct_order(
+        self,
+        signal: TradeSignal,
+        contract_factory: Any,
+    ) -> Any:
+        """Build an IBKR combo order from the trade signal legs.
+
+        Args:
+            signal: The approved trade signal with leg specifications.
+            contract_factory: A :class:`ContractFactory` instance for building
+                IBKR combo contracts.
+
+        Returns:
+            An IBKR ``Contract`` object representing the multi-leg spread.
+        """
+        legs_for_broker: list[dict[str, Any]] = []
+        for leg in signal.legs:
+            expiry = leg.expiry
+            if hasattr(expiry, "strftime"):
+                expiry = expiry.strftime("%Y%m%d")
+            legs_for_broker.append(
+                {
+                    "action": leg.action,
+                    "expiry": expiry,
+                    "strike": leg.strike,
+                    "right": leg.right,
+                    "ratio": leg.quantity,
+                }
+            )
+        return await contract_factory.build_spread(
+            ticker=signal.ticker,
+            legs=legs_for_broker,
+        )
+
+    def calculate_greeks(
+        self,
+        legs: list[LegSpec],
+        greeks: dict[str, float],
+    ) -> dict[str, float]:
+        """Aggregate Greeks across all legs of the spread.
+
+        Args:
+            legs: The constructed leg specifications.
+            greeks: Per-leg Greeks keyed by ``strike_right`` identifier.
+
+        Returns:
+            Dictionary with aggregated delta, gamma, theta, vega.
+        """
+        total_delta = 0.0
+        total_gamma = 0.0
+        total_theta = 0.0
+        total_vega = 0.0
+        for leg in legs:
+            multiplier = leg.quantity if leg.action == "BUY" else -leg.quantity
+            key = f"{leg.strike}_{leg.right}"
+            leg_greeks = greeks.get(key, {})
+            total_delta += multiplier * float(leg_greeks.get("delta", 0.0))
+            total_gamma += multiplier * float(leg_greeks.get("gamma", 0.0))
+            total_theta += multiplier * float(leg_greeks.get("theta", 0.0))
+            total_vega += multiplier * float(leg_greeks.get("vega", 0.0))
+        return {
+            "delta": round(total_delta, 6),
+            "gamma": round(total_gamma, 6),
+            "theta": round(total_theta, 6),
+            "vega": round(total_vega, 6),
+        }
 
     # ------------------------------------------------------------------
     # Internal helpers
