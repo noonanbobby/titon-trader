@@ -35,6 +35,7 @@ from ib_async import (
     Bag,
     ComboLeg,
     Contract,
+    Index,
     Option,
     OptionChain,
     Stock,
@@ -185,6 +186,47 @@ class ContractFactory:
 
         self._log.info(
             "stock_qualified",
+            ticker=ticker,
+            con_id=contract.conId,
+            exchange=contract.exchange,
+        )
+        return contract
+
+    # ------------------------------------------------------------------
+    # Index
+    # ------------------------------------------------------------------
+
+    async def create_index(
+        self,
+        ticker: str,
+        exchange: str = "CBOE",
+        currency: str = "USD",
+    ) -> Index:
+        """Create and qualify an index contract (e.g. VIX, SPX).
+
+        Args:
+            ticker: The index symbol (e.g. ``"VIX"``, ``"SPX"``).
+            exchange: Destination exchange (default ``"CBOE"``).
+            currency: Underlying currency (default ``"USD"``).
+
+        Returns:
+            A fully qualified :class:`ib_async.Index` contract.
+
+        Raises:
+            ValueError: If the contract cannot be qualified by IB Gateway.
+        """
+        contract = Index(symbol=ticker, exchange=exchange, currency=currency)
+        self._log.debug("qualifying_index", ticker=ticker, exchange=exchange)
+
+        qualified = await self._ib.qualifyContractsAsync(contract)
+        if qualified[0] is None:
+            raise ValueError(
+                f"Failed to qualify index contract: "
+                f"ticker={ticker}, exchange={exchange}, currency={currency}"
+            )
+
+        self._log.info(
+            "index_qualified",
             ticker=ticker,
             con_id=contract.conId,
             exchange=contract.exchange,

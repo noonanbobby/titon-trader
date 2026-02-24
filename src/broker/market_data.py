@@ -53,6 +53,11 @@ HISTORICAL_IV_WHAT_TO_SHOW: str = "OPTION_IMPLIED_VOLATILITY"
 STOCK_GENERIC_TICKS: str = "100,101,104,106,165,221"
 OPTION_GENERIC_TICKS: str = "100,101,104,106,221"
 
+# CBOE indices that must be fetched as Index contracts, not Stock.
+_INDEX_SYMBOLS: frozenset[str] = frozenset(
+    {"VIX", "VXN", "OVX", "GVZ", "VVIX", "SPX", "NDX", "RUT", "DJX"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -665,7 +670,10 @@ class MarketDataManager:
             A :class:`MarketSnapshot` with current market prices.
         """
         try:
-            contract = await self._factory.create_stock(ticker)
+            if ticker in _INDEX_SYMBOLS:
+                contract = await self._factory.create_index(ticker)
+            else:
+                contract = await self._factory.create_stock(ticker)
         except ValueError:
             self._log.warning("snapshot_qualify_failed", ticker=ticker)
             return MarketSnapshot(ticker=ticker)
@@ -725,7 +733,10 @@ class MarketDataManager:
             failure.
         """
         try:
-            contract = await self._factory.create_stock(ticker)
+            if ticker in _INDEX_SYMBOLS:
+                contract = await self._factory.create_index(ticker)
+            else:
+                contract = await self._factory.create_stock(ticker)
         except ValueError:
             self._log.warning("hist_bars_qualify_failed", ticker=ticker)
             return None
@@ -798,7 +809,10 @@ class MarketDataManager:
         )
 
         try:
-            contract = await self._factory.create_stock(ticker)
+            if ticker in _INDEX_SYMBOLS:
+                contract = await self._factory.create_index(ticker)
+            else:
+                contract = await self._factory.create_stock(ticker)
         except ValueError:
             self._log.warning("hist_iv_qualify_failed", ticker=ticker)
             return pd.DataFrame(columns=["date", "iv"])

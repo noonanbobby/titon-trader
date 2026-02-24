@@ -5,6 +5,10 @@ enforces exclusion windows around earnings, FOMC, CPI, NFP, and OPEX
 dates.  New entries are blocked within configurable windows, and existing
 positions can be flagged for closure before events.
 
+When the Finnhub economic calendar endpoint is unavailable (e.g. free-tier
+403), the system falls back to hardcoded FOMC, CPI, and NFP dates published
+by the Federal Reserve and Bureau of Labor Statistics.
+
 Usage::
 
     from src.risk.event_calendar import EventCalendar
@@ -47,6 +51,127 @@ HTTP_TIMEOUT_SECONDS = 30.0
 _FOMC_KEYWORDS = ("fomc", "federal funds rate", "interest rate decision")
 _CPI_KEYWORDS = ("cpi", "consumer price index")
 _NFP_KEYWORDS = ("nonfarm payroll", "non-farm payroll", "nfp", "employment change")
+
+# ---------------------------------------------------------------------------
+# Hardcoded economic event dates — official sources
+# ---------------------------------------------------------------------------
+# These are used as a fallback when the Finnhub economic calendar endpoint
+# is unavailable (e.g. requires a paid tier).  Dates are from:
+#   FOMC: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#   CPI:  https://www.bls.gov/schedule/news_release/cpi.htm
+#   NFP:  https://www.bls.gov/schedule/news_release/empsit.htm
+#
+# FOMC dates include both days of each two-day meeting.
+# UPDATE ANNUALLY: add the next year's dates when published.
+
+_STATIC_FOMC_DATES: list[str] = [
+    # 2025
+    "2025-01-28",
+    "2025-01-29",
+    "2025-03-18",
+    "2025-03-19",
+    "2025-05-06",
+    "2025-05-07",
+    "2025-06-17",
+    "2025-06-18",
+    "2025-07-29",
+    "2025-07-30",
+    "2025-09-16",
+    "2025-09-17",
+    "2025-10-28",
+    "2025-10-29",
+    "2025-12-09",
+    "2025-12-10",
+    # 2026
+    "2026-01-27",
+    "2026-01-28",
+    "2026-03-17",
+    "2026-03-18",
+    "2026-04-28",
+    "2026-04-29",
+    "2026-06-16",
+    "2026-06-17",
+    "2026-07-28",
+    "2026-07-29",
+    "2026-09-15",
+    "2026-09-16",
+    "2026-10-27",
+    "2026-10-28",
+    "2026-12-08",
+    "2026-12-09",
+]
+
+_STATIC_CPI_DATES: list[str] = [
+    # 2025
+    "2025-01-15",
+    "2025-02-12",
+    "2025-03-12",
+    "2025-04-10",
+    "2025-05-13",
+    "2025-06-11",
+    "2025-07-15",
+    "2025-08-12",
+    "2025-09-11",
+    "2025-10-24",
+    "2025-12-18",
+    # 2026
+    "2026-01-13",
+    "2026-02-13",
+    "2026-03-11",
+    "2026-04-10",
+    "2026-05-12",
+    "2026-06-10",
+    "2026-07-14",
+    "2026-08-12",
+    "2026-09-11",
+    "2026-10-14",
+    "2026-11-10",
+    "2026-12-10",
+]
+
+_STATIC_NFP_DATES: list[str] = [
+    # 2025
+    "2025-01-10",
+    "2025-02-07",
+    "2025-03-07",
+    "2025-04-04",
+    "2025-05-02",
+    "2025-06-06",
+    "2025-07-03",
+    "2025-08-01",
+    "2025-09-05",
+    "2025-11-20",
+    "2025-12-16",
+    # 2026
+    "2026-01-09",
+    "2026-02-11",
+    "2026-03-06",
+    "2026-04-03",
+    "2026-05-08",
+    "2026-06-05",
+    "2026-07-02",
+    "2026-08-07",
+    "2026-09-04",
+    "2026-10-02",
+    "2026-11-06",
+    "2026-12-04",
+]
+
+
+def _build_static_economic_events() -> list[dict[str, Any]]:
+    """Build a list of Finnhub-style event dicts from the hardcoded dates."""
+    events: list[dict[str, Any]] = []
+    for d in _STATIC_FOMC_DATES:
+        events.append(
+            {"date": d, "event": "FOMC Interest Rate Decision", "country": "US"}
+        )
+    cpi_event = "CPI Consumer Price Index"
+    for d in _STATIC_CPI_DATES:
+        events.append({"date": d, "event": cpi_event, "country": "US"})
+    nfp_event = "Nonfarm Payroll Employment Change"
+    for d in _STATIC_NFP_DATES:
+        events.append({"date": d, "event": nfp_event, "country": "US"})
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +224,10 @@ class EventCalendar:
         """Fetch earnings and economic calendar data from Finnhub.
 
         Should be called daily at 8 AM ET to keep event data current.
+        Earnings and economic calendar fetches are isolated — a failure
+        in one does not prevent the other from completing.  If the
+        economic calendar endpoint is unavailable (e.g. 403 on free
+        tier), hardcoded FOMC/CPI/NFP dates are used as a fallback.
 
         Args:
             tickers: List of ticker symbols to fetch earnings dates for.
@@ -106,12 +235,28 @@ class EventCalendar:
         self._log.info("event_calendar_refresh_start", ticker_count=len(tickers))
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-            # Fetch earnings for each ticker
+            # Fetch earnings for each ticker — isolated per ticker
             for ticker in tickers:
-                await self._fetch_earnings(client, ticker)
+                try:
+                    await self._fetch_earnings(client, ticker)
+                except Exception:
+                    self._log.warning("earnings_fetch_skipped", ticker=ticker)
 
-            # Fetch economic calendar
-            await self._fetch_economic_calendar(client)
+            # Fetch economic calendar — isolated, with static fallback
+            try:
+                await self._fetch_economic_calendar(client)
+                self._log.info(
+                    "economic_calendar_source",
+                    source="finnhub_api",
+                    event_count=len(self._economic_events),
+                )
+            except Exception:
+                self._economic_events = _build_static_economic_events()
+                self._log.warning(
+                    "economic_calendar_using_static_fallback",
+                    source="hardcoded_2025_2026",
+                    event_count=len(self._economic_events),
+                )
 
         self._last_refresh = datetime.now(UTC)
         self._log.info(
@@ -407,14 +552,16 @@ class EventCalendar:
             raise
 
     @retry(
-        retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
+        retry=retry_if_exception_type(httpx.TimeoutException),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
     )
     async def _fetch_economic_calendar(self, client: httpx.AsyncClient) -> None:
         """Fetch the economic calendar from Finnhub.
 
-        Filters for FOMC, CPI, and NFP events.
+        Filters for FOMC, CPI, and NFP events.  Does **not** retry on
+        HTTP 4xx errors (e.g. 403 for free-tier keys) since those are
+        permanent authorization failures, not transient issues.
 
         Args:
             client: The HTTP client to use.
@@ -423,54 +570,55 @@ class EventCalendar:
         from_date = today.isoformat()
         to_date = (today + timedelta(days=90)).isoformat()
 
-        try:
-            response = await client.get(
-                f"{FINNHUB_BASE_URL}/calendar/economic",
-                params={
-                    "from": from_date,
-                    "to": to_date,
-                    "token": self._api_key,
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
+        response = await client.get(
+            f"{FINNHUB_BASE_URL}/calendar/economic",
+            params={
+                "from": from_date,
+                "to": to_date,
+                "token": self._api_key,
+            },
+        )
 
-            all_events = data.get("economicCalendar", [])
-            filtered: list[dict[str, Any]] = []
-            for event in all_events:
-                event_name = (event.get("event", "") or "").lower()
-                country = (event.get("country", "") or "").upper()
-
-                # Only US events
-                if country != "US":
-                    continue
-
-                # Filter for relevant event types
-                is_relevant = False
-                for keyword_set in (_FOMC_KEYWORDS, _CPI_KEYWORDS, _NFP_KEYWORDS):
-                    if any(kw in event_name for kw in keyword_set):
-                        is_relevant = True
-                        break
-
-                if is_relevant:
-                    filtered.append(event)
-
-            self._economic_events = filtered
-            self._log.debug(
-                "economic_calendar_fetched",
-                total_events=len(all_events),
-                relevant_events=len(filtered),
-            )
-
-        except httpx.HTTPStatusError as exc:
+        if response.status_code == 403:
             self._log.warning(
-                "economic_calendar_fetch_http_error",
-                status_code=exc.response.status_code,
+                "economic_calendar_403_not_retrying",
+                detail="Finnhub /calendar/economic requires paid economic-1 tier",
             )
-            raise
-        except Exception:
-            self._log.exception("economic_calendar_fetch_failed")
-            raise
+            raise httpx.HTTPStatusError(
+                "403 Forbidden — endpoint requires paid tier",
+                request=response.request,
+                response=response,
+            )
+
+        response.raise_for_status()
+        data = response.json()
+
+        all_events = data.get("economicCalendar", [])
+        filtered: list[dict[str, Any]] = []
+        for event in all_events:
+            event_name = (event.get("event", "") or "").lower()
+            country = (event.get("country", "") or "").upper()
+
+            # Only US events
+            if country != "US":
+                continue
+
+            # Filter for relevant event types
+            is_relevant = False
+            for keyword_set in (_FOMC_KEYWORDS, _CPI_KEYWORDS, _NFP_KEYWORDS):
+                if any(kw in event_name for kw in keyword_set):
+                    is_relevant = True
+                    break
+
+            if is_relevant:
+                filtered.append(event)
+
+        self._economic_events = filtered
+        self._log.debug(
+            "economic_calendar_fetched",
+            total_events=len(all_events),
+            relevant_events=len(filtered),
+        )
 
     # ------------------------------------------------------------------
     # Internal: Exclusion window checks

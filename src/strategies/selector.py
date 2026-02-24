@@ -563,8 +563,19 @@ class StrategySelector:
 # ---------------------------------------------------------------------------
 
 
+# Strategy names that don't follow the standard snake_case → PascalCase
+# convention.  Add entries here for any strategy whose class name cannot
+# be derived automatically from its YAML key.
+_CLASS_NAME_OVERRIDES: dict[str, str] = {
+    "pmcc": "PoorMansCC",
+}
+
+
 def _snake_to_pascal(name: str) -> str:
     """Convert a snake_case name to PascalCase.
+
+    Checks :data:`_CLASS_NAME_OVERRIDES` first for non-standard names,
+    then falls back to splitting on underscores and capitalising each word.
 
     Args:
         name: Snake-case string (e.g. ``"bull_call_spread"``).
@@ -572,6 +583,8 @@ def _snake_to_pascal(name: str) -> str:
     Returns:
         PascalCase string (e.g. ``"BullCallSpread"``).
     """
+    if name in _CLASS_NAME_OVERRIDES:
+        return _CLASS_NAME_OVERRIDES[name]
     return "".join(word.capitalize() for word in name.split("_"))
 
 

@@ -123,6 +123,8 @@ Set `IBKR_TRADING_MODE=paper` in your `.env` file. The system connects to IB Gat
 uv run pytest tests/ -v --tb=short
 ```
 
+**657 tests** covering circuit breakers, position sizing, ensemble signals, regime detection, base strategy, helpers, broker contracts, market data routing, and ML feature engineering.
+
 ## Project Structure
 
 ```

@@ -103,6 +103,11 @@ class TitanApplication:
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._kill_requested: bool = False
 
+        # Trading pause flag — set by /stop, cleared by /start.
+        # When True, scans skip trade proposal generation but risk
+        # monitoring and position checks continue.
+        self._trading_paused: bool = False
+
         # Trade submission lock — prevents overlapping scans from
         # evaluating and submitting duplicate trades concurrently.
         self._trade_lock: asyncio.Lock = asyncio.Lock()
@@ -231,8 +236,8 @@ class TitanApplication:
         # 14. Subscribe to market data for ticker universe
         await self._subscribe_market_data()
 
-        # 15. Send startup notification
-        await self._send_notification(STARTUP_MESSAGE)
+        # 15. Send startup notification with full account/portfolio summary
+        await self._send_startup_notification()
 
         self._log.info("titan_online", tickers=len(self._tickers))
 
@@ -360,6 +365,20 @@ class TitanApplication:
         self._log.warning("kill_requested_via_telegram")
         self._kill_requested = True
         self._shutdown_event.set()
+
+    def pause_trading(self) -> None:
+        """Pause new trade proposals while keeping the system running.
+
+        Risk monitoring, position checks, and notifications continue.
+        Existing positions are untouched.  Resume with :meth:`resume_trading`.
+        """
+        self._trading_paused = True
+        self._log.warning("trading_paused")
+
+    def resume_trading(self) -> None:
+        """Resume trade proposal generation after a pause."""
+        self._trading_paused = False
+        self._log.info("trading_resumed")
 
     # ------------------------------------------------------------------
     # Infrastructure connections
@@ -981,8 +1000,11 @@ class TitanApplication:
                     bot_token=(notif.telegram_bot_token.get_secret_value()),
                     chat_id=notif.telegram_chat_id,
                 )
-                # Wire /kill CONFIRM to the application shutdown handler.
+                # Wire callbacks for interactive commands.
                 self._telegram.set_kill_callback(self.request_kill)
+                self._telegram.set_pause_callback(self.pause_trading)
+                self._telegram.set_resume_callback(self.resume_trading)
+                self._telegram.set_system_state(self._get_system_state)
                 await self._telegram.start()
                 self._log.info("telegram_notifier_initialized")
             except Exception:
@@ -1115,6 +1137,27 @@ class TitanApplication:
     # Notification helper
     # ------------------------------------------------------------------
 
+    async def _send_startup_notification(self) -> None:
+        """Send a rich startup notification with account and portfolio details.
+
+        Falls back to a simple "TITAN ONLINE" alert if the Telegram
+        notifier does not support the rich startup summary or if the
+        account data is unavailable.
+        """
+        if self._telegram is None:
+            return
+
+        try:
+            state = self._get_system_state()
+            await self._telegram.send_startup_summary(state)
+        except Exception:
+            self._log.exception("startup_summary_failed")
+            # Fall back to simple notification
+            try:
+                await self._telegram.send_system_alert(STARTUP_MESSAGE)
+            except Exception:
+                self._log.exception("startup_fallback_notification_failed")
+
     async def _send_notification(self, message: str) -> None:
         """Send a notification message via all configured channels.
 
@@ -1144,6 +1187,119 @@ class TitanApplication:
                 )
 
     # ------------------------------------------------------------------
+    # System state for Telegram commands
+    # ------------------------------------------------------------------
+
+    def _get_system_state(self) -> dict[str, Any]:
+        """Build a snapshot of current system state for Telegram commands.
+
+        Returns a dict consumed by TelegramNotifier's command handlers
+        (``/status``, ``/portfolio``, ``/positions``).  All values are
+        synchronously derived from already-cached subsystem data so this
+        callable is safe to invoke from any context.
+        """
+        state: dict[str, Any] = {
+            "connected": False,
+            "trading_mode": self._settings.ibkr.trading_mode,
+            "trading_paused": self._trading_paused,
+            "net_liquidation": 0.0,
+            "buying_power": 0.0,
+            "excess_liquidity": 0.0,
+            "maint_margin": 0.0,
+            "daily_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "open_positions": 0,
+            "max_positions": self._settings.trading.max_concurrent_positions,
+            "positions": [],
+            "circuit_breaker_level": "NORMAL",
+            "regime": "unknown",
+            "tickers_count": len(self._tickers),
+        }
+
+        # Gateway connectivity
+        if self._gateway is not None:
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                state["connected"] = self._gateway.is_connected()
+
+        # Account data (ib_async caches these locally after subscription)
+        if self._account_manager is not None:
+            try:
+                ib = self._account_manager._ib
+                # Portfolio items are cached by ib_async after reqAccountUpdates
+                raw_items = ib.portfolio()
+                positions_list: list[dict[str, Any]] = []
+                for pi in raw_items:
+                    contract = pi.contract
+                    pnl = pi.unrealizedPNL if not _is_nan(pi.unrealizedPNL) else 0.0
+                    positions_list.append(
+                        {
+                            "ticker": contract.symbol or contract.localSymbol or "???",
+                            "sec_type": contract.secType or "",
+                            "strategy": contract.secType or "",
+                            "quantity": pi.position,
+                            "avg_cost": pi.averageCost,
+                            "market_value": pi.marketValue
+                            if not _is_nan(pi.marketValue)
+                            else 0.0,
+                            "unrealized_pnl": pnl,
+                        }
+                    )
+                state["positions"] = positions_list
+                state["open_positions"] = len(positions_list)
+
+                # Account summary values from ib_async cache
+                for av in ib.accountValues():
+                    tag = av.tag
+                    if av.currency not in ("USD", "BASE", ""):
+                        continue
+                    try:
+                        val = float(av.value)
+                    except (ValueError, TypeError):
+                        continue
+                    if tag == "NetLiquidation":
+                        state["net_liquidation"] = val
+                    elif tag == "BuyingPower":
+                        state["buying_power"] = val
+                    elif tag == "ExcessLiquidity":
+                        state["excess_liquidity"] = val
+                    elif tag == "FullMaintMarginReq":
+                        state["maint_margin"] = val
+            except Exception:
+                self._log.debug("system_state_account_fetch_error", exc_info=True)
+
+            # PnL from subscription (already live-cached)
+            with contextlib.suppress(Exception):
+                pnl_sub = self._account_manager._pnl_subscription
+                if pnl_sub is not None:
+                    if not _is_nan(pnl_sub.dailyPnL):
+                        state["daily_pnl"] = pnl_sub.dailyPnL
+                    if not _is_nan(pnl_sub.unrealizedPnL):
+                        state["unrealized_pnl"] = pnl_sub.unrealizedPnL
+                    if not _is_nan(pnl_sub.realizedPnL):
+                        state["realized_pnl"] = pnl_sub.realizedPnL
+
+        # Circuit breaker
+        if self._circuit_breaker is not None:
+            with contextlib.suppress(Exception):
+                state["circuit_breaker_level"] = str(
+                    self._circuit_breaker.current_level
+                )
+
+        # Regime
+        if self._regime_detector is not None:
+            try:
+                regime = getattr(self._regime_detector, "_previous_regime", None)
+                if regime is not None:
+                    state["regime"] = str(regime)
+            except Exception:
+                pass
+
+        return state
+
+    # ------------------------------------------------------------------
     # Scheduled callbacks
     # ------------------------------------------------------------------
 
@@ -1162,6 +1318,10 @@ class TitanApplication:
         try:
             if self._kill_requested:
                 self._log.warning("market_open_scan_aborted_kill")
+                return
+
+            if self._trading_paused:
+                self._log.info("market_open_scan_skipped_paused")
                 return
 
             self._log.info(
@@ -1218,6 +1378,10 @@ class TitanApplication:
         try:
             if self._kill_requested:
                 self._log.warning("intraday_scan_aborted_kill")
+                return
+
+            if self._trading_paused:
+                self._log.info("intraday_scan_skipped_paused")
                 return
 
             self._log.info(
@@ -1754,6 +1918,9 @@ class TitanApplication:
             )
 
             def _train_sync() -> None:
+                import shutil
+                from pathlib import Path
+
                 import pandas as pd
 
                 trade_df = pd.DataFrame([dict(r) for r in rows])
@@ -1776,6 +1943,29 @@ class TitanApplication:
                         if hasattr(result, "best_fold")
                         else "N/A",
                     )
+
+                    # Copy versioned model to the fixed name the ensemble expects
+                    mdir = Path(str(models_dir))
+                    versioned = sorted(mdir.glob("titan_xgboost_ensemble_v*.json"))
+                    if versioned:
+                        latest = versioned[-1]
+                        canonical = mdir / "ensemble_xgb.json"
+                        shutil.copy2(str(latest), str(canonical))
+                        self._log.info(
+                            "model_copied_to_canonical",
+                            source=latest.name,
+                            dest=canonical.name,
+                        )
+                        # Also copy companion calibrator if it exists
+                        cal_src = latest.with_suffix(".calibrator.pkl")
+                        if cal_src.exists():
+                            cal_dst = mdir / "ensemble_xgb.calibrator.pkl"
+                            shutil.copy2(str(cal_src), str(cal_dst))
+                            self._log.info(
+                                "calibrator_copied_to_canonical",
+                                source=cal_src.name,
+                                dest=cal_dst.name,
+                            )
 
             await loop.run_in_executor(None, _train_sync)
 

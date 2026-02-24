@@ -2,7 +2,8 @@
 
 Provides real-time trade alerts, daily summaries, circuit-breaker
 notifications, and interactive command handlers (``/status``,
-``/positions``, ``/kill``) via the Telegram Bot API.
+``/portfolio``, ``/start``, ``/stop``, ``/kill``, ``/help``) via the
+Telegram Bot API.
 
 Usage::
 
@@ -58,6 +59,11 @@ _EMOJI_STOP: str = "\U0001f6d1"  # Stop sign
 _EMOJI_INFO: str = "\u2139\ufe0f"  # Information
 _EMOJI_MONEY: str = "\U0001f4b0"  # Money bag
 _EMOJI_SKULL: str = "\U0001f480"  # Skull (emergency)
+_EMOJI_PAUSE: str = "\u23f8\ufe0f"  # Pause
+_EMOJI_PLAY: str = "\u25b6\ufe0f"  # Play
+_EMOJI_PORTFOLIO: str = "\U0001f4bc"  # Briefcase
+_EMOJI_CHECK: str = "\u2705"  # Check mark
+_EMOJI_CLOCK: str = "\U0001f552"  # Clock
 
 # Severity-to-emoji mapping.
 _SEVERITY_EMOJI: dict[str, str] = {
@@ -157,6 +163,10 @@ class TelegramNotifier:
         # actually triggers TitanApplication.request_kill().
         self._kill_callback: Callable[[], None] | None = None
 
+        # Pause/resume callbacks — injected by main application.
+        self._pause_callback: Callable[[], None] | None = None
+        self._resume_callback: Callable[[], None] | None = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -188,6 +198,24 @@ class TelegramNotifier:
         """
         self._kill_callback = callback
 
+    def set_pause_callback(self, callback: Callable[[], None]) -> None:
+        """Inject a callback invoked when /stop is received.
+
+        Args:
+            callback: Typically ``TitanApplication.pause_trading`` which
+                sets the trading-paused flag.
+        """
+        self._pause_callback = callback
+
+    def set_resume_callback(self, callback: Callable[[], None]) -> None:
+        """Inject a callback invoked when /start is received.
+
+        Args:
+            callback: Typically ``TitanApplication.resume_trading`` which
+                clears the trading-paused flag.
+        """
+        self._resume_callback = callback
+
     async def start(self) -> None:
         """Initialize the bot application, register commands, and begin
         polling for incoming updates."""
@@ -199,6 +227,9 @@ class TelegramNotifier:
         # Register command handlers.
         self._app.add_handler(CommandHandler("status", self._handle_status))
         self._app.add_handler(CommandHandler("positions", self._handle_positions))
+        self._app.add_handler(CommandHandler("portfolio", self._handle_portfolio))
+        self._app.add_handler(CommandHandler("start", self._handle_start))
+        self._app.add_handler(CommandHandler("stop", self._handle_stop))
         self._app.add_handler(CommandHandler("kill", self._handle_kill))
         self._app.add_handler(CommandHandler("help", self._handle_help))
 
@@ -414,6 +445,73 @@ class TelegramNotifier:
             message=message,
         )
 
+    async def send_startup_summary(self, state: dict[str, Any]) -> None:
+        """Send a rich startup notification with account and portfolio details.
+
+        Called once during application startup after all subsystems are
+        initialized and account data is available.
+
+        Args:
+            state: Dictionary with keys: ``trading_mode``, ``net_liquidation``,
+                ``buying_power``, ``excess_liquidity``, ``daily_pnl``,
+                ``unrealized_pnl``, ``open_positions``, ``positions``,
+                ``circuit_breaker_level``, ``regime``, ``tickers_count``.
+        """
+        mode = state.get("trading_mode", "unknown").upper()
+        mode_emoji = _EMOJI_WARNING if mode == "LIVE" else _EMOJI_INFO
+
+        fmt = self._format_currency
+        nl = fmt(state.get("net_liquidation", 0.0))
+        bp = fmt(state.get("buying_power", 0.0))
+        el = fmt(state.get("excess_liquidity", 0.0))
+        dp = fmt(state.get("daily_pnl", 0.0))
+        up = fmt(state.get("unrealized_pnl", 0.0))
+
+        lines = [
+            f"{_EMOJI_ROBOT} TITAN ONLINE {mode_emoji} [{mode}]",
+            "",
+            f"{_EMOJI_PORTFOLIO} ACCOUNT",
+            f"  Net Liq:    {nl}",
+            f"  Buying Pwr: {bp}",
+            f"  Excess Liq: {el}",
+            "",
+            f"{_EMOJI_CHART} P&L",
+            f"  Daily P&L:  {dp}",
+            f"  Unrealized: {up}",
+            "",
+            f"{_EMOJI_INFO} SYSTEM",
+            f"  Circuit Breaker: {state.get('circuit_breaker_level', 'NORMAL')}",
+            f"  Regime:          {state.get('regime', 'unknown')}",
+            f"  Tickers:         {state.get('tickers_count', 0)}",
+            f"  Trading:  {'PAUSED' if state.get('trading_paused') else 'ACTIVE'}",
+        ]
+
+        # Append position summary
+        positions: list[dict[str, Any]] = state.get("positions", [])
+        open_count = state.get("open_positions", len(positions))
+        lines.append("")
+        if positions:
+            lines.append(f"{_EMOJI_MONEY} POSITIONS ({open_count})")
+            for pos in positions:
+                pnl = pos.get("unrealized_pnl", 0.0)
+                pnl_emoji = _EMOJI_GREEN if pnl >= 0 else _EMOJI_RED
+                ticker = pos.get("ticker", "???")
+                strategy = pos.get("strategy", pos.get("sec_type", "???"))
+                qty = pos.get("quantity", 0)
+                lines.append(
+                    f"  {pnl_emoji} {ticker} | {strategy}"
+                    f" | Qty: {qty}"
+                    f" | P&L: {self._format_currency(pnl)}"
+                )
+        else:
+            lines.append(f"{_EMOJI_INFO} No open positions")
+
+        lines.append("")
+        lines.append(f"{_EMOJI_CHECK} All systems operational")
+
+        await self._enqueue_message("\n".join(lines))
+        self._log.info("startup_summary_sent")
+
     # ------------------------------------------------------------------
     # Command handlers
     # ------------------------------------------------------------------
@@ -425,21 +523,54 @@ class TelegramNotifier:
     ) -> None:
         """Handle the /status command.
 
-        Returns current system state: connectivity, regime, open
-        positions, daily P&L, and circuit-breaker level.
+        Returns current system state: connectivity, regime, account
+        summary, P&L, circuit-breaker level, and trading status.
         """
         state = self._get_system_state()
+
+        connected = state.get("connected", False)
+        conn_icon = _EMOJI_GREEN if connected else _EMOJI_RED
+
+        trading_paused = state.get("trading_paused", False)
+        trading_label = (
+            f"{_EMOJI_PAUSE} PAUSED" if trading_paused else f"{_EMOJI_PLAY} ACTIVE"
+        )
+
+        cb_level = state.get("circuit_breaker_level", "NORMAL")
+        cb_icon = _EMOJI_GREEN if cb_level == "NORMAL" else _EMOJI_WARNING
+        if cb_level in ("HALT", "EMERGENCY"):
+            cb_icon = _EMOJI_SIREN
+
+        fmt = self._format_currency
+        dp = fmt(state.get("daily_pnl", 0.0))
+        up = fmt(state.get("unrealized_pnl", 0.0))
+        nl = fmt(state.get("net_liquidation", 0.0))
+        bp = fmt(state.get("buying_power", 0.0))
+        pos_cur = state.get("open_positions", 0)
+        pos_max = state.get("max_positions", 8)
 
         lines = [
             f"{_EMOJI_ROBOT} TITAN STATUS",
             "",
-            (f"Connected: {'Yes' if state.get('connected', False) else 'No'}"),
-            f"Regime: {state.get('regime', 'unknown')}",
-            (f"Open Positions: {state.get('open_positions', 0)}"),
-            (f"Daily P&L: {self._format_currency(state.get('daily_pnl', 0.0))}"),
-            (f"CB Level: {state.get('circuit_breaker_level', 'NORMAL')}"),
-            (f"Kill Flag: {'ACTIVE' if self._kill_flag else 'inactive'}"),
+            f"{conn_icon} Connected: {'Yes' if connected else 'No'}",
+            f"  Mode:    {state.get('trading_mode', 'unknown').upper()}",
+            f"  Trading: {trading_label}",
+            "",
+            f"{_EMOJI_CHART} P&L",
+            f"  Daily:      {dp}",
+            f"  Unrealized: {up}",
+            "",
+            f"{_EMOJI_PORTFOLIO} Account",
+            f"  Net Liq:     {nl}",
+            f"  Buying Power: {bp}",
+            "",
+            f"{cb_icon} Circuit Breaker: {cb_level}",
+            f"  Regime: {state.get('regime', 'unknown')}",
+            f"  Positions: {pos_cur}/{pos_max}",
         ]
+
+        if self._kill_flag:
+            lines.append(f"\n{_EMOJI_SKULL} KILL FLAG ACTIVE")
 
         await self._safe_reply(update, "\n".join(lines))
 
@@ -474,6 +605,139 @@ class TelegramNotifier:
             )
 
         await self._safe_reply(update, "\n".join(lines))
+
+    async def _handle_portfolio(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle the /portfolio command.
+
+        Returns full account overview with positions, P&L, and margin.
+        Combines the information from /status and /positions into a
+        single comprehensive view.
+        """
+        state = self._get_system_state()
+
+        fmt = self._format_currency
+        nl = fmt(state.get("net_liquidation", 0.0))
+        bp = fmt(state.get("buying_power", 0.0))
+        el = fmt(state.get("excess_liquidity", 0.0))
+        mm = fmt(state.get("maint_margin", 0.0))
+
+        lines = [
+            f"{_EMOJI_PORTFOLIO} PORTFOLIO OVERVIEW",
+            "",
+            "ACCOUNT",
+            f"  Net Liq:      {nl}",
+            f"  Buying Pwr:   {bp}",
+            f"  Excess Liq:   {el}",
+            f"  Maint Margin: {mm}",
+            "",
+            "P&L",
+            f"  Daily:      {self._format_currency(state.get('daily_pnl', 0.0))}",
+            f"  Unrealized: {self._format_currency(state.get('unrealized_pnl', 0.0))}",
+            f"  Realized:   {self._format_currency(state.get('realized_pnl', 0.0))}",
+        ]
+
+        positions: list[dict[str, Any]] = state.get("positions", [])
+        lines.append("")
+        if positions:
+            total_unrealized = 0.0
+            lines.append(f"POSITIONS ({len(positions)})")
+            for pos in positions:
+                pnl = pos.get("unrealized_pnl", 0.0)
+                total_unrealized += pnl
+                pnl_emoji = _EMOJI_GREEN if pnl >= 0 else _EMOJI_RED
+                ticker = pos.get("ticker", "???")
+                strategy = pos.get("strategy", pos.get("sec_type", "???"))
+                qty = pos.get("quantity", 0)
+                mkt_val = pos.get("market_value", 0.0)
+                lines.append(
+                    f"  {pnl_emoji} {ticker} | {strategy}"
+                    f" | Qty: {qty}"
+                    f" | Val: {self._format_currency(mkt_val)}"
+                    f" | P&L: {self._format_currency(pnl)}"
+                )
+            lines.append(
+                f"\n  Total Unrealized: {self._format_currency(total_unrealized)}"
+            )
+        else:
+            lines.append(f"{_EMOJI_INFO} No open positions")
+
+        lines.append("")
+        cb_level = state.get("circuit_breaker_level", "NORMAL")
+        lines.append(f"CB: {cb_level} | Regime: {state.get('regime', 'unknown')}")
+
+        await self._safe_reply(update, "\n".join(lines))
+
+    async def _handle_start(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle the /start command — resume trading.
+
+        Clears the trading-paused flag so scheduled scans will execute
+        trade proposals again.
+        """
+        if self._resume_callback is not None:
+            try:
+                self._resume_callback()
+                self._log.info("trading_resumed_via_telegram")
+                await self._safe_reply(
+                    update,
+                    f"{_EMOJI_PLAY} Trading RESUMED\nScans will execute normally.",
+                )
+            except Exception:
+                self._log.exception("resume_callback_failed")
+                await self._safe_reply(
+                    update,
+                    f"{_EMOJI_RED} Failed to resume trading. Check logs.",
+                )
+        else:
+            await self._safe_reply(
+                update,
+                f"{_EMOJI_WARNING} Resume callback not wired."
+                " System may not support pause/resume.",
+            )
+
+    async def _handle_stop(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Handle the /stop command — pause trading.
+
+        Sets the trading-paused flag so scheduled scans will skip trade
+        proposals. Does NOT cancel existing positions or shut down the
+        system. Use /kill CONFIRM for emergency shutdown.
+        """
+        if self._pause_callback is not None:
+            try:
+                self._pause_callback()
+                self._log.info("trading_paused_via_telegram")
+                await self._safe_reply(
+                    update,
+                    (
+                        f"{_EMOJI_PAUSE} Trading PAUSED\n"
+                        f"Existing positions are untouched.\n"
+                        f"Risk monitoring continues.\n"
+                        f"Use /start to resume."
+                    ),
+                )
+            except Exception:
+                self._log.exception("pause_callback_failed")
+                await self._safe_reply(
+                    update,
+                    f"{_EMOJI_RED} Failed to pause trading. Check logs.",
+                )
+        else:
+            await self._safe_reply(
+                update,
+                f"{_EMOJI_WARNING} Pause callback not wired."
+                " System may not support pause/resume.",
+            )
 
     async def _handle_kill(
         self,
@@ -541,10 +805,13 @@ class TelegramNotifier:
         lines = [
             f"{_EMOJI_ROBOT} TITAN BOT COMMANDS",
             "",
-            "/status   — Current system state",
-            "/positions — List all open positions",
-            "/kill CONFIRM — Emergency stop (requires confirmation)",
-            "/help     — Show this message",
+            "/status     — System status, P&L, connection",
+            "/portfolio  — Full account & positions overview",
+            "/positions  — List open positions with P&L",
+            "/start      — Resume trading (after /stop)",
+            "/stop       — Pause new trades (keeps positions)",
+            "/kill CONFIRM — Emergency shutdown",
+            "/help       — Show this message",
         ]
 
         await self._safe_reply(update, "\n".join(lines))

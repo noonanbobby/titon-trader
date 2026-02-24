@@ -219,6 +219,105 @@ class FeatureEngineer:
 
         return combined
 
+    def build_trade_features(self, trade_df: pd.DataFrame) -> pd.DataFrame:
+        """Build a feature matrix from closed trade records for model retraining.
+
+        Extracts predictive features from trade metadata (no external API calls
+        needed).  Designed for the weekly retrain pipeline where the input is a
+        DataFrame of rows from the PostgreSQL ``trades`` table.
+
+        Expected input columns: ``ticker``, ``strategy``, ``direction``,
+        ``entry_price``, ``exit_price``, ``realized_pnl``, ``ml_confidence``,
+        ``regime``, ``entry_time``, ``exit_time``.
+
+        Args:
+            trade_df: DataFrame of closed trade records.
+
+        Returns:
+            A clean numeric feature matrix with one row per trade.  NaN values
+            are forward-filled then filled with column medians.
+        """
+        self._log.info(
+            "building_trade_features",
+            n_trades=len(trade_df),
+            columns=list(trade_df.columns),
+        )
+
+        features = pd.DataFrame(index=trade_df.index)
+
+        # --- ML confidence at entry ---
+        if "ml_confidence" in trade_df.columns:
+            features["ml_confidence"] = pd.to_numeric(
+                trade_df["ml_confidence"], errors="coerce"
+            )
+
+        # --- One-hot encode regime (4 states) ---
+        regime_dummies = pd.get_dummies(
+            trade_df.get("regime", pd.Series(dtype=str)),
+            prefix="regime",
+        )
+        features = pd.concat([features, regime_dummies], axis=1)
+
+        # --- One-hot encode strategy (10 strategies) ---
+        strategy_dummies = pd.get_dummies(
+            trade_df.get("strategy", pd.Series(dtype=str)),
+            prefix="strategy",
+        )
+        features = pd.concat([features, strategy_dummies], axis=1)
+
+        # --- Direction encoded: 1=bullish, -1=bearish, 0=neutral ---
+        direction_map = {"bullish": 1, "bearish": -1, "neutral": 0}
+        if "direction" in trade_df.columns:
+            features["direction_encoded"] = (
+                trade_df["direction"]
+                .str.lower()
+                .map(direction_map)
+                .fillna(0)
+                .astype(int)
+            )
+
+        # --- Hold days (exit_time - entry_time) ---
+        if "entry_time" in trade_df.columns and "exit_time" in trade_df.columns:
+            entry = pd.to_datetime(trade_df["entry_time"], errors="coerce")
+            exit_ = pd.to_datetime(trade_df["exit_time"], errors="coerce")
+            hold_td = exit_ - entry
+            features["hold_days"] = hold_td.dt.total_seconds() / 86400.0
+
+        # --- Entry hour (hour of day) ---
+        if "entry_time" in trade_df.columns:
+            entry = pd.to_datetime(trade_df["entry_time"], errors="coerce")
+            features["entry_hour"] = entry.dt.hour
+
+        # --- Day of week (0=Mon, 4=Fri) ---
+        if "entry_time" in trade_df.columns:
+            entry = pd.to_datetime(trade_df["entry_time"], errors="coerce")
+            features["day_of_week"] = entry.dt.dayofweek
+
+        # --- Log entry price ---
+        if "entry_price" in trade_df.columns:
+            price = pd.to_numeric(trade_df["entry_price"], errors="coerce")
+            features["log_price"] = np.log(price.clip(lower=0.01))
+
+        # Ensure all columns are numeric
+        features = features.apply(pd.to_numeric, errors="coerce")
+
+        # Impute: forward-fill then median (same pattern as build_feature_matrix)
+        features = features.ffill()
+        medians = features.median()
+        features = features.fillna(medians)
+
+        # Final fallback: fill any remaining NaN with 0
+        features = features.fillna(0)
+
+        self._log.info(
+            "trade_features_built",
+            shape=features.shape,
+            n_features=len(features.columns),
+            columns=list(features.columns),
+        )
+
+        return features
+
     def select_features(
         self,
         X: pd.DataFrame,  # noqa: N803

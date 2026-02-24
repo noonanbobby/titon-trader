@@ -665,15 +665,15 @@ The following critical formulas and systems have been forensically audited and v
 | Backtester slippage | `backtest.py:1005-1100` | 15% of spread (within 10-25% spec) |
 | Earnings exclusion window | `event_calendar.py:493-516` | 5 days before through 1 day after |
 
-### Known Limitations (Acceptable for Phase 1)
+### Previously Reported Limitations (Now Resolved)
 
-These items are documented, understood, and acceptable for paper trading. Address before live trading:
+All three limitations from the Phase 1 audit have been addressed:
 
-1. **`min_recovery_days` loaded but never enforced** in `circuit_breakers.py:99` — the cooling period config is read but not referenced in recovery advancement logic.
+1. ~~**`min_recovery_days` loaded but never enforced**~~ — **RESOLVED (2026-02-24).** Enforced in both `is_trading_allowed()` (`circuit_breakers.py:257-276`) and `_check_recovery_advance()` (`circuit_breakers.py:594-604`). HALT/EMERGENCY levels block trading until the cooling-off period elapses.
 
-2. **Market holidays hardcoded for 2025-2026 only** in `helpers.py:39-63` — must be updated annually.
+2. ~~**Market holidays hardcoded for 2025-2026 only**~~ — **RESOLVED (2026-02-24).** Replaced with dynamic `compute_nyse_holidays(year)` in `helpers.py:104-148` using algorithmic computation (Easter, nth-weekday, NYSE observation rules). Works for any year, LRU-cached.
 
-3. **Test coverage is 0% for actual `src/` modules** — the 37 existing tests validate math formulas only, not the classes themselves. Test directories exist but are empty.
+3. ~~**Test coverage is 0% for actual `src/` modules**~~ — **RESOLVED (2026-02-24).** 657 tests now cover core `src/` modules: circuit breakers, position sizer, ensemble signals, regime detection, base strategy, helpers, broker contracts, market data routing, and ML feature engineering.
 
 ### Fixes Applied in This Audit (2026-02-24)
 
@@ -708,3 +708,26 @@ These items are documented, understood, and acceptable for paper trading. Addres
 | Signal pipeline | `main.py:1530-1800` | Implemented full `_run_signal_pipeline()`: spot price fetch, parallel signal gathering (sentiment, flow, insider, cross-asset), regime detection, VRP, ensemble scoring, confidence gate, AI orchestrator routing with fallback |
 | Order status polling | `execution_agent.py:1008-1095` | Implemented `_poll_order_status()`: queries OrderManager for live Trade objects, maps ib_async status strings to canonical states (FILLED/CANCELLED/REJECTED/PARTIAL/PENDING), extracts fill price/qty/time |
 | Orchestrator → OrderManager | `agents.py:607, 697` | Added `order_manager` parameter pass-through from orchestrator to ExecutionAgent |
+
+### Fixes Applied (2026-02-24 — Intelligence Layer)
+
+| Fix | File | Description |
+|-----|------|-------------|
+| VIX Index contract support | `contracts.py` | Added `Index` import and `create_index()` method to `ContractFactory` (exchange default: CBOE) |
+| Index routing in MarketDataManager | `market_data.py` | Added `_INDEX_SYMBOLS` frozenset (VIX, SPX, NDX, RUT, VVIX, etc.) and routing in `get_snapshot()`, `get_historical_bars()`, `get_historical_iv()` |
+| `build_trade_features()` method | `features.py` | Implemented missing method for weekly retrain: extracts ml_confidence, one-hot regime/strategy, direction encoding, hold_days, entry_hour, day_of_week, log_price (~20 features) |
+| Model path alignment | `main.py` | After `trainer.train()`, copies latest `titan_xgboost_ensemble_v*.json` to `ensemble_xgb.json` via `shutil.copy2` so hot-swap code finds the retrained model |
+| Broker test coverage | `tests/test_broker/` | 26 tests for `ContractFactory` (create_stock, create_index, create_option, create_combo, SpreadLeg validation) + 35 tests for `MarketDataManager` (index routing, snapshot, historical bars, historical IV, Pydantic models, helpers) |
+| ML features test coverage | `tests/test_ml/test_features.py` | 40 tests for `FeatureEngineer` (build_trade_features, build_feature_matrix, select_features, normalize, target variable, lagged features, correlated removal) |
+
+### Verified Correct (Added 2026-02-24)
+
+| Component | File | Status |
+|-----------|------|--------|
+| Index contract creation | `contracts.py:196-232` | Uses `ib_async.Index`, default exchange CBOE, qualifies via gateway |
+| `_INDEX_SYMBOLS` routing | `market_data.py:57-59` | 9 CBOE indices routed to `create_index()` in all 3 methods |
+| `build_trade_features()` | `features.py:110-200` | One-hot encoding, direction map, hold_days, log_price, NaN imputation |
+| Model path copy | `main.py:_train_sync` | Globs versioned files, copies latest to canonical `ensemble_xgb.json` |
+| `min_recovery_days` enforcement | `circuit_breakers.py:257-276, 594-604` | Blocks trading and recovery advance during cooling-off |
+| Dynamic NYSE holidays | `helpers.py:104-148` | Algorithmic computation, works for any year |
+| Test suite | `tests/` | 657 tests passing (101 new for broker, market data, ML features) |

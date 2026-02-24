@@ -184,7 +184,7 @@ class SentimentAnalyzer:
         loop = asyncio.get_running_loop()
         self._tokenizer = await loop.run_in_executor(
             None,
-            lambda: AutoTokenizer.from_pretrained(self._model_name),
+            lambda: AutoTokenizer.from_pretrained(self._model_name, use_fast=False),
         )
         self._model = await loop.run_in_executor(
             None,

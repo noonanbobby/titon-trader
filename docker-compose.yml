@@ -10,15 +10,16 @@ services:
       TWOFA_TIMEOUT_ACTION: restart
       AUTO_RESTART_TIME: "23:45"
       RELOGIN_AFTER_2FA_TIMEOUT: "yes"
-      IBC_AcceptIncomingConnectionAction: accept
+      TWS_ACCEPT_INCOMING: accept
     ports:
       - "127.0.0.1:4001:4001"
       - "127.0.0.1:4002:4002"
+      - "127.0.0.1:4004:4004"
       - "127.0.0.1:5900:5900"
     volumes:
       - ib-gateway-settings:/home/ibgateway/Jts
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4002"]
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/4004"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -96,10 +97,11 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/health')"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 90s
 
   prometheus:
     image: prom/prometheus:latest
