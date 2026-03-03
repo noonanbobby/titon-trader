@@ -1,29 +1,36 @@
 """Meta-learner combining all signal streams for Project Titan.
 
-Collects calibrated outputs from all signal generators (technical, sentiment,
-options flow, regime, GEX, insider, VRP, cross-asset) and combines them
-through an XGBoost meta-learner with isotonic regression calibration to
-produce a final confidence score between 0.0 and 1.0.
+Provides two inference paths:
 
-When no trained model exists on disk, a weighted-average fallback model is
-created automatically so the system can trade before ML training completes.
+1. **Signal-level meta-learner** (``EnsembleSignalGenerator``): Combines
+   calibrated outputs from 8 signal generators (technical, sentiment,
+   options flow, regime, GEX, insider, VRP, cross-asset) through a
+   48-feature weighted-average or XGBoost model.
+
+2. **ML ensemble predictor** (``MLEnsemblePredictor``): Loads all 3 models
+   (XGBoost, LightGBM, CatBoost) trained during walk-forward validation,
+   averages their predictions, and applies isotonic calibration.  Uses the
+   93-feature technical/macro feature set from ``models/feature_names.json``.
 
 Usage::
 
     from src.signals.ensemble import (
-        EnsembleSignalGenerator, SignalInputs, EnsembleResult,
+        EnsembleSignalGenerator, MLEnsemblePredictor,
+        SignalInputs, EnsembleResult,
     )
 
+    # Signal-level pipeline
     generator = EnsembleSignalGenerator(confidence_threshold=0.78)
     await generator.load_model("models/ensemble_xgb.json")
 
-    result = await generator.generate_signal("AAPL", signals)
-    if result.should_trade:
-        print(f"Trade {result.ticker} with confidence {result.confidence:.2f}")
+    # ML ensemble (3-model)
+    ml_predictor = MLEnsemblePredictor(model_dir="models/")
+    confidence = ml_predictor.predict(features_df)
 """
 
 from __future__ import annotations
 
+import json
 import pickle
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +44,7 @@ from src.utils.logging import get_logger
 from src.utils.metrics import CONFIDENCE_SCORE, SIGNAL_SCORE
 
 if TYPE_CHECKING:
+    import pandas as pd
     import structlog
 
 # ---------------------------------------------------------------------------
@@ -804,3 +812,236 @@ class EnsembleSignalGenerator:
             return "bearish"
         else:
             return "neutral"
+
+
+# ---------------------------------------------------------------------------
+# MLEnsemblePredictor — 3-model ML inference
+# ---------------------------------------------------------------------------
+
+
+class MLEnsemblePredictor:
+    """Three-model ensemble predictor with isotonic calibration.
+
+    Loads XGBoost, LightGBM, and CatBoost models trained during walk-forward
+    validation, averages their predicted probabilities, and applies an
+    isotonic regression calibrator to produce well-calibrated confidence
+    scores.
+
+    This predictor operates on the 93-feature technical/macro feature set
+    (as defined in ``models/feature_names.json``), distinct from the
+    48-feature signal-level vector used by ``EnsembleSignalGenerator``.
+
+    Args:
+        model_dir: Directory containing trained model files and metadata.
+        confidence_threshold: Minimum calibrated score to recommend a trade.
+    """
+
+    def __init__(
+        self,
+        model_dir: str = "models/",
+        confidence_threshold: float = 0.78,
+    ) -> None:
+        self._model_dir: Path = Path(model_dir)
+        self._confidence_threshold: float = confidence_threshold
+        self._log: structlog.stdlib.BoundLogger = get_logger("signals.ml_ensemble")
+
+        self._xgb_model: XGBClassifier | None = None
+        self._lgb_model: Any = None  # lgb.Booster
+        self._cat_model: Any = None  # CatBoostClassifier
+        self._calibrator: Any = None
+        self._feature_names: list[str] = []
+        self._model_version: str = "unloaded"
+        self._n_models_loaded: int = 0
+
+        self._load_all()
+
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+
+    def _load_all(self) -> None:
+        """Load all 3 models, calibrator, and feature list from disk."""
+        self._n_models_loaded = 0
+
+        # --- XGBoost ---
+        xgb_path = self._model_dir / "ensemble_xgb.json"
+        if xgb_path.exists():
+            try:
+                model = XGBClassifier()
+                model.load_model(str(xgb_path))
+                self._xgb_model = model
+                self._n_models_loaded += 1
+                self._log.info("xgboost_loaded", path=str(xgb_path))
+            except Exception:
+                self._log.exception("xgboost_load_failed", path=str(xgb_path))
+        else:
+            self._log.warning("xgboost_not_found", path=str(xgb_path))
+
+        # --- LightGBM ---
+        lgb_path = self._model_dir / "ensemble_lgb.pkl"
+        if lgb_path.exists():
+            try:
+                import lightgbm as lgb
+
+                self._lgb_model = lgb.Booster(model_file=str(lgb_path))
+                self._n_models_loaded += 1
+                self._log.info("lightgbm_loaded", path=str(lgb_path))
+            except Exception:
+                self._log.exception("lightgbm_load_failed", path=str(lgb_path))
+        else:
+            self._log.warning("lightgbm_not_found", path=str(lgb_path))
+
+        # --- CatBoost ---
+        cat_path = self._model_dir / "ensemble_cat.cbm"
+        if cat_path.exists():
+            try:
+                from catboost import CatBoostClassifier as CatCls
+
+                cat_model = CatCls()
+                cat_model.load_model(str(cat_path))
+                self._cat_model = cat_model
+                self._n_models_loaded += 1
+                self._log.info("catboost_loaded", path=str(cat_path))
+            except Exception:
+                self._log.exception("catboost_load_failed", path=str(cat_path))
+        else:
+            self._log.warning("catboost_not_found", path=str(cat_path))
+
+        # --- Calibrator ---
+        cal_path = self._model_dir / "ensemble_calibrator.pkl"
+        if cal_path.exists():
+            try:
+                import joblib
+
+                self._calibrator = joblib.load(cal_path)
+                self._log.info("calibrator_loaded", path=str(cal_path))
+            except Exception:
+                self._log.exception("calibrator_load_failed", path=str(cal_path))
+        else:
+            self._log.warning("calibrator_not_found", path=str(cal_path))
+
+        # --- Feature names ---
+        feat_path = self._model_dir / "feature_names.json"
+        if feat_path.exists():
+            with open(feat_path) as f:
+                self._feature_names = json.load(f)
+        else:
+            self._log.warning("feature_names_not_found", path=str(feat_path))
+
+        self._model_version = (
+            f"ensemble-{self._n_models_loaded}model-f{len(self._feature_names)}"
+        )
+
+        self._log.info(
+            "ml_ensemble_loaded",
+            n_models=self._n_models_loaded,
+            n_features=len(self._feature_names),
+            calibrator_loaded=self._calibrator is not None,
+            model_version=self._model_version,
+        )
+
+    # ------------------------------------------------------------------
+    # Prediction
+    # ------------------------------------------------------------------
+
+    def predict(self, features: pd.DataFrame) -> float:
+        """Generate a calibrated confidence score from 3-model ensemble.
+
+        Selects the columns specified by ``feature_names.json``, runs each
+        loaded model, averages the probabilities, and applies isotonic
+        calibration.
+
+        Args:
+            features: DataFrame containing at least the columns listed
+                in ``models/feature_names.json``.  Typically a single row.
+
+        Returns:
+            Calibrated probability between 0.0 and 1.0.
+
+        Raises:
+            RuntimeError: If no models are loaded.
+        """
+        if self._n_models_loaded == 0:
+            raise RuntimeError("No ML models loaded — cannot predict")
+
+        # Select and order features to match training
+        missing = [f for f in self._feature_names if f not in features.columns]
+        if missing:
+            self._log.warning(
+                "missing_features_filled_zero",
+                n_missing=len(missing),
+                missing=missing[:5],
+            )
+            for col in missing:
+                features = features.assign(**{col: 0.0})
+
+        feat_matrix = features[self._feature_names].copy()
+
+        # Replace NaN/inf
+        feat_matrix = feat_matrix.fillna(0.0)
+        feat_matrix = feat_matrix.replace([np.inf, -np.inf], 0.0)
+
+        probas: list[float] = []
+
+        # XGBoost
+        if self._xgb_model is not None:
+            xgb_p = float(self._xgb_model.predict_proba(feat_matrix)[:, 1][0])
+            probas.append(xgb_p)
+
+        # LightGBM (Booster — predict returns raw scores, apply sigmoid)
+        if self._lgb_model is not None:
+            lgb_raw = float(self._lgb_model.predict(feat_matrix)[0])
+            lgb_p = 1.0 / (1.0 + np.exp(-lgb_raw))
+            probas.append(float(lgb_p))
+
+        # CatBoost
+        if self._cat_model is not None:
+            cat_p = float(self._cat_model.predict_proba(feat_matrix)[:, 1][0])
+            probas.append(cat_p)
+
+        # Average
+        raw = float(np.mean(probas))
+
+        # Calibrate
+        if self._calibrator is not None:
+            calibrated = float(self._calibrator.predict(np.array([raw]))[0])
+            calibrated = float(np.clip(calibrated, 0.0, 1.0))
+        else:
+            calibrated = raw
+
+        self._log.debug(
+            "ml_ensemble_prediction",
+            raw=round(raw, 4),
+            calibrated=round(calibrated, 4),
+            n_models=len(probas),
+        )
+
+        return calibrated
+
+    def should_trade(self, calibrated_score: float) -> bool:
+        """Check if calibrated score meets the confidence threshold."""
+        return calibrated_score >= self._confidence_threshold
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def model_version(self) -> str:
+        """Return the model version string."""
+        return self._model_version
+
+    @property
+    def feature_names(self) -> list[str]:
+        """Return the ordered list of feature names expected by the models."""
+        return list(self._feature_names)
+
+    @property
+    def n_models_loaded(self) -> int:
+        """Return the number of successfully loaded models."""
+        return self._n_models_loaded
+
+    @property
+    def confidence_threshold(self) -> float:
+        """Return the confidence threshold."""
+        return self._confidence_threshold
