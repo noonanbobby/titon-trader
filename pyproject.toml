@@ -44,6 +44,7 @@ dependencies = [
     "xgboost>=2.0.0",
     "pyarrow>=23.0.1",
     "lxml>=6.0.2",
+    "catboost>=1.2.10",
 ]
 
 [tool.ruff]

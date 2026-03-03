@@ -276,6 +276,7 @@ class WalkForwardTrainer:
             model, fold_metrics = self._train_fold(
                 X_train, y_train, X_val, y_val, model_type
             )
+            fold_metrics.fold_num = fold_num
             fold_metrics_list.append(fold_metrics)
             all_importances.append(fold_metrics.feature_importances)
 
@@ -477,7 +478,16 @@ class WalkForwardTrainer:
         if ext == "json":
             model.save_model(str(model_path))
         elif ext == "txt":
-            model.booster_.save_model(str(model_path))
+            # LGBMClassifier: use booster_ if available, else pickle
+            if hasattr(model, "booster_"):
+                model.booster_.save_model(str(model_path))
+            else:
+                import pickle
+
+                pkl_path = model_path.with_suffix(".pkl")
+                with open(pkl_path, "wb") as pkl_f:
+                    pickle.dump(model, pkl_f)
+                model_path = pkl_path
         elif ext == "cbm":
             model.save_model(str(model_path))
         else:
@@ -581,8 +591,366 @@ class WalkForwardTrainer:
         return model, metadata
 
     # ------------------------------------------------------------------
+    # Walk-Forward Ensemble Training
+    # ------------------------------------------------------------------
+
+    def train_walk_forward_ensemble(
+        self,
+        X: pd.DataFrame,  # noqa: N803
+        y: pd.Series,
+        dates: pd.Series,
+        train_months: int = 12,
+        test_months: int = 1,
+        model_types: list[str] | None = None,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        """Monthly rolling walk-forward training with 3-model ensemble.
+
+        For each window:
+        1. Split data chronologically (train_months train, test_months test)
+        2. Run purged 5-fold CV within training data for estimation
+        3. Train final models on full training window with early stopping
+        4. Evaluate ensemble on held-out test window (OOS)
+        5. Record all metrics
+
+        Args:
+            X: Feature matrix (n_samples x n_features).
+            y: Binary target variable.
+            dates: Date for each row (used for temporal splitting).
+            train_months: Training window size in months.
+            test_months: Test window size in months.
+            model_types: List of model backends. Defaults to all three.
+            verbose: Print progress to stdout.
+
+        Returns:
+            Dictionary with all results, per-window metrics, and
+            aggregate statistics.
+        """
+        if model_types is None:
+            model_types = ["xgboost", "lightgbm", "catboost"]
+
+        start_time = time.monotonic()
+
+        # Convert dates to month periods for windowing
+        months = dates.dt.to_period("M")
+        unique_months = sorted(months.unique())
+
+        if len(unique_months) < train_months + test_months:
+            raise ValueError(
+                f"Need at least {train_months + test_months} months of data, "
+                f"got {len(unique_months)}"
+            )
+
+        window_results: list[dict[str, Any]] = []
+        all_importances: dict[str, list[dict[str, float]]] = {
+            mt: [] for mt in model_types
+        }
+
+        n_windows = len(unique_months) - train_months
+        if verbose:
+            print(
+                f"Walk-forward: {n_windows} windows, "
+                f"{train_months}mo train / {test_months}mo test"
+            )
+
+        for w_idx in range(train_months, len(unique_months)):
+            test_month = unique_months[w_idx]
+            train_start_month = unique_months[w_idx - train_months]
+            train_end_month = unique_months[w_idx - 1]
+
+            # Build masks
+            train_mask = (months >= train_start_month) & (months <= train_end_month)
+            test_mask = months == test_month
+
+            X_train = X.loc[train_mask]  # noqa: N806
+            y_train = y.loc[train_mask]
+            X_test = X.loc[test_mask]  # noqa: N806
+            y_test = y.loc[test_mask]
+
+            if len(X_test) < 10 or len(X_train) < 100:
+                continue
+
+            # --- Inner purged CV on training data ---
+            cv_aucs: list[float] = []
+            inner_splits = self._purged_kfold_split(X_train, y_train)
+            for train_idx, val_idx in inner_splits:
+                X_cv_train = X_train.iloc[train_idx]  # noqa: N806
+                y_cv_train = y_train.iloc[train_idx]
+                X_cv_val = X_train.iloc[val_idx]  # noqa: N806
+                y_cv_val = y_train.iloc[val_idx]
+
+                # Quick XGBoost for CV estimation
+                cv_model = self._get_model("xgboost")
+                cv_model.fit(
+                    X_cv_train,
+                    y_cv_train,
+                    eval_set=[(X_cv_val, y_cv_val)],
+                    verbose=False,
+                )
+                try:
+                    cv_proba = cv_model.predict_proba(X_cv_val)[:, 1]
+                    cv_aucs.append(float(roc_auc_score(y_cv_val, cv_proba)))
+                except ValueError:
+                    cv_aucs.append(0.5)
+
+            cv_auc_mean = float(np.mean(cv_aucs)) if cv_aucs else 0.5
+            cv_auc_std = float(np.std(cv_aucs)) if cv_aucs else 0.0
+
+            # --- Train all 3 models on full training window ---
+            # Use last 20% of training window as eval set for early stopping
+            es_split = int(len(X_train) * 0.8)
+            X_train_fit = X_train.iloc[:es_split]  # noqa: N806
+            y_train_fit = y_train.iloc[:es_split]
+            X_train_eval = X_train.iloc[es_split:]  # noqa: N806
+            y_train_eval = y_train.iloc[es_split:]
+
+            window_models: dict[str, Any] = {}
+            window_probas: dict[str, np.ndarray] = {}
+            window_aucs: dict[str, float] = {}
+            window_accs: dict[str, float] = {}
+
+            for mt in model_types:
+                model = self._get_model(mt)
+                self._fit_model(
+                    model,
+                    mt,
+                    X_train_fit,
+                    y_train_fit,
+                    X_train_eval,
+                    y_train_eval,
+                )
+
+                # OOS predictions
+                y_proba = model.predict_proba(X_test)[:, 1]
+                y_pred = model.predict(X_test)
+
+                try:
+                    auc = float(roc_auc_score(y_test, y_proba))
+                except ValueError:
+                    auc = 0.5
+
+                acc = float(accuracy_score(y_test, y_pred))
+
+                window_models[mt] = model
+                window_probas[mt] = y_proba
+                window_aucs[mt] = auc
+                window_accs[mt] = acc
+
+                # Collect feature importances
+                imps = self._extract_importances(model, X_train.columns.tolist())
+                all_importances[mt].append(imps)
+
+            # Ensemble prediction (simple average)
+            ensemble_proba = np.mean([window_probas[mt] for mt in model_types], axis=0)
+            ensemble_pred = (ensemble_proba >= 0.5).astype(int)
+
+            try:
+                ens_auc = float(roc_auc_score(y_test, ensemble_proba))
+            except ValueError:
+                ens_auc = 0.5
+
+            ens_acc = float(accuracy_score(y_test, ensemble_pred))
+
+            window_result = {
+                "window": len(window_results) + 1,
+                "train_period": f"{train_start_month} to {train_end_month}",
+                "test_period": str(test_month),
+                "train_size": len(X_train),
+                "test_size": len(X_test),
+                "cv_auc_mean": round(cv_auc_mean, 4),
+                "cv_auc_std": round(cv_auc_std, 4),
+                "oos_auc": round(ens_auc, 4),
+                "oos_accuracy": round(ens_acc, 4),
+                "per_model_auc": {mt: round(window_aucs[mt], 4) for mt in model_types},
+                "per_model_acc": {mt: round(window_accs[mt], 4) for mt in model_types},
+                "models": window_models,
+            }
+            window_results.append(window_result)
+
+            if verbose:
+                print(
+                    f"  Window {window_result['window']:2d} | "
+                    f"Train: {train_start_month}–{train_end_month} | "
+                    f"Test: {test_month} | "
+                    f"CV AUC: {cv_auc_mean:.3f}±{cv_auc_std:.3f} | "
+                    f"OOS AUC: {ens_auc:.3f} | "
+                    f"OOS Acc: {ens_acc:.3f}"
+                )
+
+        if not window_results:
+            raise RuntimeError("No valid walk-forward windows produced")
+
+        # --- Aggregate metrics ---
+        oos_aucs = [w["oos_auc"] for w in window_results]
+        oos_accs = [w["oos_accuracy"] for w in window_results]
+        cv_aucs_all = [w["cv_auc_mean"] for w in window_results]
+
+        # Average feature importances across all windows for each model
+        avg_importances_per_model: dict[str, dict[str, float]] = {}
+        for mt in model_types:
+            avg_importances_per_model[mt] = self._average_importances(
+                all_importances[mt]
+            )
+
+        # Combined importances (average across models)
+        combined_imp: dict[str, list[float]] = {}
+        for mt in model_types:
+            for feat, imp in avg_importances_per_model[mt].items():
+                combined_imp.setdefault(feat, []).append(imp)
+        avg_importances_combined = {
+            feat: round(float(np.mean(vals)), 6) for feat, vals in combined_imp.items()
+        }
+
+        elapsed = time.monotonic() - start_time
+
+        result = {
+            "n_windows": len(window_results),
+            "n_models": len(model_types),
+            "model_types": model_types,
+            "train_months": train_months,
+            "test_months": test_months,
+            "window_results": window_results,
+            "avg_oos_auc": round(float(np.mean(oos_aucs)), 4),
+            "min_oos_auc": round(float(np.min(oos_aucs)), 4),
+            "max_oos_auc": round(float(np.max(oos_aucs)), 4),
+            "std_oos_auc": round(float(np.std(oos_aucs)), 4),
+            "avg_oos_accuracy": round(float(np.mean(oos_accs)), 4),
+            "avg_cv_auc": round(float(np.mean(cv_aucs_all)), 4),
+            "feature_importances": avg_importances_combined,
+            "per_model_importances": avg_importances_per_model,
+            "total_train_samples": sum(w["train_size"] for w in window_results),
+            "train_time_seconds": round(elapsed, 2),
+        }
+
+        self._log.info(
+            "walk_forward_ensemble_complete",
+            n_windows=result["n_windows"],
+            avg_oos_auc=result["avg_oos_auc"],
+            train_time_seconds=result["train_time_seconds"],
+        )
+
+        return result
+
+    def prune_features(
+        self,
+        importances: dict[str, float],
+        threshold: float = 0.005,
+    ) -> list[str]:
+        """Identify features to keep based on importance threshold.
+
+        Args:
+            importances: Feature name to average importance mapping.
+            threshold: Minimum fraction of total importance to keep.
+
+        Returns:
+            List of feature names that pass the threshold.
+        """
+        total = sum(importances.values())
+        if total == 0:
+            return list(importances.keys())
+
+        kept = [feat for feat, imp in importances.items() if imp / total >= threshold]
+
+        self._log.info(
+            "feature_pruning",
+            original=len(importances),
+            kept=len(kept),
+            pruned=len(importances) - len(kept),
+            threshold=threshold,
+        )
+
+        return kept
+
+    def save_ensemble_models(
+        self,
+        window_results: list[dict[str, Any]],
+        feature_names: list[str],
+        metadata: dict[str, Any],
+        model_types: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Save the models from the most recent window.
+
+        Args:
+            window_results: List of per-window results from walk-forward.
+            feature_names: Ordered list of feature names.
+            metadata: Aggregate metadata dict.
+            model_types: Model types to save.
+
+        Returns:
+            Dict mapping model type to saved file path.
+        """
+        if model_types is None:
+            model_types = ["xgboost", "lightgbm", "catboost"]
+
+        last_window = window_results[-1]
+        models = last_window["models"]
+        saved_paths: dict[str, str] = {}
+
+        for mt in model_types:
+            if mt not in models:
+                continue
+
+            model = models[mt]
+            model_meta = ModelMetadata(
+                model_name=f"titan_{mt}_ensemble",
+                version=self._next_model_version(mt),
+                trained_at=datetime.now(UTC),
+                train_start=date.today(),
+                train_end=date.today(),
+                n_features=len(feature_names),
+                feature_names=feature_names,
+                hyperparams=self._get_model_params(model),
+                val_accuracy=metadata.get("avg_oos_accuracy", 0.0),
+                val_auc=metadata.get("avg_oos_auc", 0.0),
+            )
+            path = self.save_model(model, model_meta)
+            saved_paths[mt] = path
+
+        return saved_paths
+
+    # ------------------------------------------------------------------
     # Internal methods
     # ------------------------------------------------------------------
+
+    def _fit_model(
+        self,
+        model: Any,
+        model_type: str,
+        X_train: pd.DataFrame,  # noqa: N803
+        y_train: pd.Series,
+        X_val: pd.DataFrame,  # noqa: N803
+        y_val: pd.Series,
+    ) -> None:
+        """Fit a model with early stopping on a validation set.
+
+        Handles the different fit() signatures for XGBoost, LightGBM,
+        and CatBoost.
+        """
+        if model_type == "xgboost":
+            model.fit(
+                X_train,
+                y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=False,
+            )
+        elif model_type == "lightgbm":
+            model.fit(
+                X_train,
+                y_train,
+                eval_set=[(X_val, y_val)],
+            )
+        elif model_type == "catboost":
+            from catboost import Pool
+
+            eval_pool = Pool(X_val, y_val)
+            model.fit(
+                X_train,
+                y_train,
+                eval_set=eval_pool,
+                verbose=False,
+            )
+        else:
+            model.fit(X_train, y_train)
 
     def _purged_kfold_split(
         self,
@@ -680,27 +1048,7 @@ class WalkForwardTrainer:
             A tuple of ``(trained_model, fold_metrics)``.
         """
         model = self._get_model(model_type)
-
-        # Fit with early stopping on the validation set
-        if model_type in ("xgboost", "lightgbm"):
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=[(X_val, y_val)],
-                verbose=False,
-            )
-        elif model_type == "catboost":
-            from catboost import Pool
-
-            eval_pool = Pool(X_val, y_val)
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=eval_pool,
-                verbose=False,
-            )
-        else:
-            model.fit(X_train, y_train)
+        self._fit_model(model, model_type, X_train, y_train, X_val, y_val)
 
         # Predict on validation set
         y_pred = model.predict(X_val)
@@ -719,7 +1067,7 @@ class WalkForwardTrainer:
         importances = self._extract_importances(model, X_train.columns.tolist())
 
         fold_metrics = FoldMetrics(
-            fold_num=0,  # Will be set by caller
+            fold_num=-1,  # Updated by caller in train() loop
             train_size=len(X_train),
             val_size=len(X_val),
             accuracy=round(accuracy, 4),
@@ -747,16 +1095,19 @@ class WalkForwardTrainer:
             from xgboost import XGBClassifier
 
             return XGBClassifier(
-                max_depth=6,
                 n_estimators=500,
+                max_depth=6,
                 learning_rate=0.05,
                 subsample=0.8,
                 colsample_bytree=0.8,
+                min_child_weight=5,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
+                eval_metric="auc",
                 early_stopping_rounds=50,
-                eval_metric="logloss",
                 random_state=42,
-                verbosity=0,
                 n_jobs=-1,
+                verbosity=0,
                 tree_method="hist",
             )
 
@@ -764,31 +1115,29 @@ class WalkForwardTrainer:
             from lightgbm import LGBMClassifier
 
             return LGBMClassifier(
-                max_depth=6,
                 n_estimators=500,
+                max_depth=6,
                 learning_rate=0.05,
                 subsample=0.8,
                 colsample_bytree=0.8,
-                early_stopping_rounds=50,
-                metric="binary_logloss",
+                min_child_weight=5,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
                 random_state=42,
-                verbosity=-1,
                 n_jobs=-1,
+                verbose=-1,
             )
 
         if model_type == "catboost":
             from catboost import CatBoostClassifier
 
             return CatBoostClassifier(
-                depth=6,
                 iterations=500,
+                depth=6,
                 learning_rate=0.05,
-                subsample=0.8,
-                early_stopping_rounds=50,
-                eval_metric="Logloss",
+                l2_leaf_reg=3.0,
                 random_seed=42,
-                verbose=False,
-                thread_count=-1,
+                verbose=0,
             )
 
         raise ValueError(

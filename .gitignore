@@ -50,3 +50,4 @@ node_modules/
 # Claude local config
 .claude/settings.local.json
 .claude/memory.jsonl
+catboost_info/

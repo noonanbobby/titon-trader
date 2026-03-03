@@ -1,0 +1,26 @@
+{
+  "n_windows": 29,
+  "n_models": 3,
+  "model_types": [
+    "xgboost",
+    "lightgbm",
+    "catboost"
+  ],
+  "train_months": 12,
+  "test_months": 1,
+  "avg_oos_auc": 0.579,
+  "min_oos_auc": 0.4504,
+  "max_oos_auc": 0.7746,
+  "std_oos_auc": 0.0823,
+  "avg_oos_accuracy": 0.5171,
+  "avg_cv_auc": 0.7174,
+  "n_features": 93,
+  "total_train_samples": 72550,
+  "train_time_seconds": 163.85,
+  "generated_at": "2026-03-03T23:10:20.197548+00:00",
+  "model_paths": {
+    "xgboost": "/home/titan/projects/titan/models/titan_xgboost_ensemble_v3.json",
+    "lightgbm": "/home/titan/projects/titan/models/titan_lightgbm_ensemble_v3.txt",
+    "catboost": "/home/titan/projects/titan/models/titan_catboost_ensemble_v3.cbm"
+  }
+}
