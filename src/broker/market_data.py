@@ -75,6 +75,7 @@ class OptionGreeks(BaseModel):
     theta: float = Field(default=0.0, description="Option theta (daily)")
     vega: float = Field(default=0.0, description="Option vega")
     implied_vol: float = Field(default=0.0, description="Implied volatility")
+    open_interest: int = Field(default=0, description="Open interest")
     und_price: float = Field(
         default=0.0,
         description="Underlying price at time of calc",
@@ -149,20 +150,52 @@ def _dte(expiry_str: str, ref: date | None = None) -> int:
     return (_expiry_to_date(expiry_str) - ref).days
 
 
-def _pick_smart_chain(chains: list[OptionChainParams]) -> OptionChainParams:
-    """Select the SMART-exchange chain, falling back to the first available.
+def _is_monthly_expiry(expiry_str: str) -> bool:
+    """Return True if *expiry_str* falls on the 3rd Friday of its month.
+
+    Monthly options expire on the 3rd Friday.  Weekly/daily expirations
+    are filtered out to avoid illiquid contracts per the trading rules.
+    """
+    dt = _expiry_to_date(expiry_str)
+    # 3rd Friday: weekday() == 4 (Friday) and 15 <= day <= 21
+    return dt.weekday() == 4 and 15 <= dt.day <= 21
+
+
+def _pick_smart_chain(
+    chains: list[OptionChainParams], ticker: str = ""
+) -> OptionChainParams:
+    """Select the SMART-exchange monthly option chain.
+
+    IB returns multiple SMART chains — one per trading class (monthly,
+    weekly, etc.).  The standard monthly chain has a ``trading_class``
+    that matches the ticker symbol (e.g. ``"AAPL"`` for AAPL monthlies).
 
     Args:
         chains: List of chain parameter sets returned by
             :meth:`ContractFactory.get_option_chain_params`.
+        ticker: Underlying symbol — used to match the monthly
+            trading class.
 
     Returns:
-        The :class:`OptionChainParams` for the SMART exchange, or the
-        first entry if SMART is not present.
+        The monthly :class:`OptionChainParams` for the SMART exchange,
+        falling back to any SMART chain, then the first entry.
     """
+    # Prefer SMART chain whose trading_class matches the ticker (= monthlies)
+    smart_monthly: OptionChainParams | None = None
+    smart_any: OptionChainParams | None = None
+
     for chain in chains:
-        if chain.exchange == "SMART":
-            return chain
+        if chain.exchange != "SMART":
+            continue
+        if smart_any is None:
+            smart_any = chain
+        if ticker and chain.trading_class == ticker:
+            smart_monthly = chain
+
+    if smart_monthly is not None:
+        return smart_monthly
+    if smart_any is not None:
+        return smart_any
     return chains[0]
 
 
@@ -317,12 +350,11 @@ class MarketDataManager:
             active_streams=self.subscription_count,
         )
 
-    async def unsubscribe_all(self) -> None:
-        """Cancel all active market data subscriptions (stocks and options)."""
-        symbols = list(self._subscriptions.keys())
-        for symbol in symbols:
-            await self.unsubscribe_ticker(symbol)
+    async def cancel_option_subscriptions(self) -> None:
+        """Cancel all option market data subscriptions.
 
+        Used to free up streaming lines after GEX calculations.
+        """
         con_ids = list(self._option_subscriptions.keys())
         for con_id in con_ids:
             entry = self._option_subscriptions.pop(con_id, None)
@@ -331,10 +363,23 @@ class MarketDataManager:
                 ib_ticker.updateEvent -= self._tick_callback
                 self._ib.cancelMktData(contract)
 
+        if con_ids:
+            self._log.debug(
+                "option_subscriptions_cancelled",
+                count=len(con_ids),
+            )
+
+    async def unsubscribe_all(self) -> None:
+        """Cancel all active market data subscriptions (stocks and options)."""
+        symbols = list(self._subscriptions.keys())
+        for symbol in symbols:
+            await self.unsubscribe_ticker(symbol)
+
+        await self.cancel_option_subscriptions()
+
         self._log.info(
             "unsubscribed_all",
             cleared_stocks=len(symbols),
-            cleared_options=len(con_ids),
         )
 
     # ------------------------------------------------------------------
@@ -381,23 +426,24 @@ class MarketDataManager:
             self._log.warning("no_chain_params", ticker=ticker)
             return []
 
-        # Pick the SMART exchange chain (preferred for routing)
-        smart_chain = _pick_smart_chain(chain_params)
+        # Pick the SMART exchange chain matching the monthly trading class
+        smart_chain = _pick_smart_chain(chain_params, ticker)
 
         self._log.debug(
             "chain_params_selected",
             ticker=ticker,
             exchange=smart_chain.exchange,
+            trading_class=smart_chain.trading_class,
             total_expirations=len(smart_chain.expirations),
             total_strikes=len(smart_chain.strikes),
         )
 
-        # Step 2 — Filter expirations by DTE
+        # Step 2 — Filter expirations: monthly only + DTE window
         today = date.today()
         valid_expirations: list[str] = []
         for exp in sorted(smart_chain.expirations):
             dte = _dte(exp, today)
-            if min_dte <= dte <= max_dte:
+            if min_dte <= dte <= max_dte and _is_monthly_expiry(exp):
                 valid_expirations.append(exp)
 
         if not valid_expirations:
@@ -440,7 +486,7 @@ class MarketDataManager:
             strikes=selected_strikes,
         )
 
-        # Step 5 — Build option contracts
+        # Step 5 — Build option contracts with tradingClass for exact matching
         raw_contracts: list[Option] = []
         for exp in valid_expirations:
             for strike in selected_strikes:
@@ -453,6 +499,7 @@ class MarketDataManager:
                         exchange="SMART",
                         multiplier=smart_chain.multiplier,
                         currency="USD",
+                        tradingClass=smart_chain.trading_class,
                     )
                     raw_contracts.append(opt)
 
@@ -567,9 +614,9 @@ class MarketDataManager:
             self._log.warning("no_chain_params_iv_surface", ticker=ticker)
             return IVSurface(ticker=ticker)
 
-        smart_chain = _pick_smart_chain(chain_params)
+        smart_chain = _pick_smart_chain(chain_params, ticker)
 
-        # Filter expirations
+        # Filter expirations — monthly only unless caller provides specific dates
         today = date.today()
         if expirations is not None:
             target_expirations = [
@@ -577,7 +624,9 @@ class MarketDataManager:
             ]
         else:
             target_expirations = [
-                e for e in sorted(smart_chain.expirations) if 7 <= _dte(e, today) <= 90
+                e
+                for e in sorted(smart_chain.expirations)
+                if 7 <= _dte(e, today) <= 90 and _is_monthly_expiry(e)
             ]
 
         if not target_expirations:
@@ -595,9 +644,7 @@ class MarketDataManager:
             all_strikes, spot_price, num_strikes
         )
 
-        # Build call options only for IV surface (calls and puts should
-        # yield the same IV in theory; we use calls for convention and
-        # add puts for put-side skew).
+        # Build call + put options for IV surface with tradingClass.
         raw_contracts: list[Option] = []
         for exp in target_expirations:
             for strike in selected_strikes:
@@ -611,6 +658,7 @@ class MarketDataManager:
                             exchange="SMART",
                             multiplier=smart_chain.multiplier,
                             currency="USD",
+                            tradingClass=smart_chain.trading_class,
                         )
                     )
 
@@ -1039,6 +1087,10 @@ class MarketDataManager:
         if bid > 0 and ask > 0:
             mid_price = (bid + ask) / 2.0
 
+        # Open interest from tick type 101
+        oi_raw = _safe_float(ib_ticker.openInterest)
+        oi = int(oi_raw) if oi_raw > 0 else 0
+
         if comp is None:
             return OptionGreeks(
                 con_id=opt.conId,
@@ -1046,6 +1098,7 @@ class MarketDataManager:
                 expiry=opt.lastTradeDateOrContractMonth,
                 strike=opt.strike,
                 right=opt.right,
+                open_interest=oi,
                 mid_price=mid_price,
             )
 
@@ -1060,6 +1113,7 @@ class MarketDataManager:
             theta=_safe_float(comp.theta),
             vega=_safe_float(comp.vega),
             implied_vol=_safe_float(comp.impliedVol),
+            open_interest=oi,
             und_price=_safe_float(comp.undPrice),
             mid_price=mid_price,
         )

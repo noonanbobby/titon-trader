@@ -350,6 +350,16 @@ class RegimeDetector:
         if current_vix > VIX_CRISIS_THRESHOLD:
             regime = REGIME_CRISIS
             confidence = max(confidence, 0.95)
+        elif regime == REGIME_CRISIS:
+            # Safety net: HMM should never produce crisis (it's not in the
+            # state mapping), but guard against stale models or mapping bugs.
+            self._log.warning(
+                "regime_crisis_override_corrected",
+                reason="HMM predicted crisis but VIX is below threshold",
+                vix=current_vix,
+                threshold=VIX_CRISIS_THRESHOLD,
+            )
+            regime = REGIME_HIGH_VOL_TREND
 
         # Build state probability dict keyed by regime name
         prob_by_regime: dict[str, float] = {}
@@ -388,22 +398,16 @@ class RegimeDetector:
     def _map_states_to_regimes(self, model: GaussianHMM) -> dict[int, str]:
         """Map HMM state indices to human-readable regime names.
 
-        Examines the learned emission distribution means to classify
-        each state:
+        The 3-state HMM maps to three non-crisis regimes only:
+        ``low_vol_trend``, ``high_vol_trend``, and ``range_bound``.
+        Crisis is NEVER an HMM state — it is exclusively triggered by
+        the VIX > 35 hard override in :meth:`predict`.
 
-        - The state with the highest mean volatility is classified as
-          ``"crisis"`` if its mean return is negative, or
-          ``"high_vol_trend"`` if its mean return is positive.
-        - The state with the lowest mean volatility is classified as
-          ``"low_vol_trend"`` if its mean return is meaningfully
-          positive, or ``"range_bound"`` if its mean return is near
-          zero.
-        - Remaining states are assigned based on their return/vol
-          characteristics.
-
-        When ``n_states`` is less than 4, some regimes will not appear
-        in the mapping.  When ``n_states`` exceeds 4, duplicate regime
-        labels are possible -- the most extreme states take priority.
+        Mapping strategy:
+        - Sort states by realized volatility mean (ascending).
+        - Lowest vol → ``low_vol_trend`` (calm, trending market).
+        - Highest vol → ``high_vol_trend`` (volatile but trending).
+        - Middle vol → ``range_bound`` (choppy, premium-rich).
 
         Args:
             model: A fitted :class:`~hmmlearn.hmm.GaussianHMM`.
@@ -421,72 +425,22 @@ class RegimeDetector:
         # Sort states by realized vol (feature index 1) ascending
         vol_order: list[int] = sorted(range(n), key=lambda i: float(means[i, 1]))
 
-        # Sort states by VIX mean (feature index 2) descending for crisis detection
-        vix_order: list[int] = sorted(
-            range(n), key=lambda i: float(means[i, 2]), reverse=True
-        )
-
-        assigned: set[int] = set()
-        used_regimes: set[str] = set()
-
-        # Step 1: Highest VIX / highest vol state --> crisis or high_vol_trend
-        highest_vix_state = vix_order[0]
-        mean_return_high_vix = float(means[highest_vix_state, 0])
-        mean_vix_high = float(means[highest_vix_state, 2])
-
-        if mean_return_high_vix < 0 or mean_vix_high > VIX_HIGH_VOL_THRESHOLD:
-            mapping[highest_vix_state] = REGIME_CRISIS
-            used_regimes.add(REGIME_CRISIS)
+        # 3-state mapping: crisis is NEVER an HMM state.
+        # Crisis is exclusively the VIX > 35 hard override in predict().
+        # HMM states map to: low_vol_trend, range_bound, high_vol_trend
+        if n == 3:
+            mapping[vol_order[0]] = REGIME_LOW_VOL_TREND
+            mapping[vol_order[1]] = REGIME_RANGE_BOUND
+            mapping[vol_order[2]] = REGIME_HIGH_VOL_TREND
+        elif n == 2:
+            mapping[vol_order[0]] = REGIME_LOW_VOL_TREND
+            mapping[vol_order[1]] = REGIME_HIGH_VOL_TREND
         else:
-            mapping[highest_vix_state] = REGIME_HIGH_VOL_TREND
-            used_regimes.add(REGIME_HIGH_VOL_TREND)
-        assigned.add(highest_vix_state)
-
-        # Step 2: Lowest vol state --> low_vol_trend or range_bound
-        lowest_vol_state = vol_order[0]
-        if lowest_vol_state not in assigned:
-            mean_return_low_vol = float(means[lowest_vol_state, 0])
-            # Positive annualized return above a small threshold indicates trend
-            return_threshold = 0.02  # ~2% annualized
-            if mean_return_low_vol > return_threshold:
-                mapping[lowest_vol_state] = REGIME_LOW_VOL_TREND
-                used_regimes.add(REGIME_LOW_VOL_TREND)
-            else:
-                mapping[lowest_vol_state] = REGIME_RANGE_BOUND
-                used_regimes.add(REGIME_RANGE_BOUND)
-            assigned.add(lowest_vol_state)
-
-        # Step 3: Assign remaining states
-        for state_idx in range(n):
-            if state_idx in assigned:
-                continue
-
-            mean_ret = float(means[state_idx, 0])
-            mean_vol = float(means[state_idx, 1])
-            mean_vix = float(means[state_idx, 2])
-
-            # Determine the best label based on characteristics
-            if mean_ret < -0.05 and mean_vix > VIX_HIGH_VOL_THRESHOLD:
-                candidate = REGIME_CRISIS
-            elif mean_vol > 0.20 or mean_vix > VIX_HIGH_VOL_THRESHOLD:
-                candidate = REGIME_HIGH_VOL_TREND
-            elif mean_ret > 0.02 and mean_vol < 0.15:
-                candidate = REGIME_LOW_VOL_TREND
-            else:
-                candidate = REGIME_RANGE_BOUND
-
-            # If the candidate is already used and a better alternative exists,
-            # try the next best label
-            if candidate in used_regimes:
-                # Fallback priority based on characteristics
-                for fallback in ALL_REGIMES:
-                    if fallback not in used_regimes:
-                        candidate = fallback
-                        break
-
-            mapping[state_idx] = candidate
-            used_regimes.add(candidate)
-            assigned.add(state_idx)
+            # n >= 4: lowest → low_vol, highest → high_vol, rest → range_bound
+            mapping[vol_order[0]] = REGIME_LOW_VOL_TREND
+            mapping[vol_order[-1]] = REGIME_HIGH_VOL_TREND
+            for i in range(1, n - 1):
+                mapping[vol_order[i]] = REGIME_RANGE_BOUND
 
         self._log.debug(
             "state_regime_mapping",

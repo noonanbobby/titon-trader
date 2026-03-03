@@ -241,6 +241,10 @@ class TitanApplication:
 
         self._log.info("titan_online", tickers=len(self._tickers))
 
+        # 16. Run a startup scan if we came up during market hours.
+        # This ensures crash recovery doesn't miss the day's scans.
+        await self._maybe_run_startup_scan()
+
     async def stop(self) -> None:
         """Execute the graceful shutdown sequence.
 
@@ -412,7 +416,7 @@ class TitanApplication:
             database=pg.db,
         )
 
-        max_retries = 10
+        max_retries = 60
         retry_delay = 2.0
 
         for attempt in range(1, max_retries + 1):
@@ -1300,6 +1304,52 @@ class TitanApplication:
         return state
 
     # ------------------------------------------------------------------
+    # Startup scan (crash recovery)
+    # ------------------------------------------------------------------
+
+    async def _maybe_run_startup_scan(self) -> None:
+        """Run an immediate scan if the bot starts during market hours.
+
+        After a crash or restart, scheduled cron scans that already
+        passed for the day will not fire retroactively.  This method
+        checks if the current time falls within US equity market hours
+        (9:35 AM – 3:55 PM ET, Mon–Fri) and, if so, triggers a full
+        universe scan identical to the market-open scan.
+        """
+        from datetime import datetime
+
+        import pytz
+
+        eastern = pytz.timezone("US/Eastern")
+        now = datetime.now(eastern)
+
+        # Only on weekdays
+        if now.weekday() >= 5:
+            self._log.info("startup_scan_skipped_weekend")
+            return
+
+        market_open = now.replace(hour=9, minute=35, second=0, microsecond=0)
+        market_close = now.replace(hour=15, minute=55, second=0, microsecond=0)
+
+        if not (market_open <= now <= market_close):
+            self._log.info(
+                "startup_scan_skipped_outside_hours",
+                current_time=now.strftime("%H:%M:%S"),
+            )
+            return
+
+        self._log.info(
+            "startup_scan_triggered",
+            current_time=now.strftime("%H:%M:%S"),
+            reason="crash_recovery",
+        )
+
+        try:
+            await self._on_market_open_scan()
+        except Exception:
+            self._log.exception("startup_scan_failed")
+
+    # ------------------------------------------------------------------
     # Scheduled callbacks
     # ------------------------------------------------------------------
 
@@ -2158,7 +2208,7 @@ class TitanApplication:
                 # Fetch recent OHLCV bars from IBKR for technical features
                 bars = await self._market_data.get_historical_bars(
                     ticker,
-                    duration="100 D",
+                    duration="2 Y",
                     bar_size="1 day",
                 )
                 if bars is not None and not bars.empty:
@@ -2269,20 +2319,59 @@ class TitanApplication:
                 return
             try:
                 chain = await self._market_data.get_options_chain(ticker)
-                if chain:
-                    gex_profile = self._gex_calculator.calculate_gex(chain, spot_price)
-                    gex_levels = self._gex_calculator.identify_levels(gex_profile)
-                    gex_signal = self._gex_calculator.get_gex_signal(
-                        gex_profile,
-                        gex_levels,
-                        spot_price,
+                if not chain:
+                    return
+
+                # Enrich with Greeks + OI (subscribe, wait, extract)
+                greeks_map = await self._market_data.get_option_greeks(chain)
+
+                # Cancel option subscriptions to free streaming lines
+                await self._market_data.cancel_option_subscriptions()
+
+                if not greeks_map:
+                    self._log.warning("gex_no_greeks", ticker=ticker)
+                    return
+
+                # Convert OptionGreeks to dict format for calculate_gex
+                chain_dicts: list[dict[str, Any]] = []
+                for greeks in greeks_map.values():
+                    if greeks.gamma == 0.0:
+                        continue  # Skip contracts with no gamma data
+                    chain_dicts.append(
+                        {
+                            "ticker": ticker,
+                            "symbol": ticker,
+                            "strike": greeks.strike,
+                            "right": greeks.right,
+                            "open_interest": greeks.open_interest,
+                            "oi": greeks.open_interest,
+                            "gamma": greeks.gamma,
+                            "delta": greeks.delta,
+                        }
                     )
-                    signal_inputs_kwargs["gex_score"] = gex_signal.score
-                    signal_inputs_kwargs["gex_net_gex"] = gex_signal.net_gex
-                    signal_inputs_kwargs["gex_regime"] = gex_signal.regime
-                    SIGNAL_SCORE.labels(signal_type="gex", ticker=ticker).set(
-                        gex_signal.score
-                    )
+
+                if not chain_dicts:
+                    self._log.warning("gex_no_valid_greeks", ticker=ticker)
+                    return
+
+                gex_profile = self._gex_calculator.calculate_gex(
+                    chain_dicts, spot_price
+                )
+                gex_levels = self._gex_calculator.identify_levels(
+                    {s.strike: s.net_gex for s in gex_profile.gex_by_strike},
+                    spot_price,
+                )
+                gex_signal = self._gex_calculator.get_gex_signal(
+                    gex_profile,
+                    gex_levels,
+                    spot_price,
+                )
+                signal_inputs_kwargs["gex_score"] = gex_signal.score
+                signal_inputs_kwargs["gex_net_gex"] = gex_signal.net_gex
+                signal_inputs_kwargs["gex_regime"] = gex_signal.regime
+                SIGNAL_SCORE.labels(signal_type="gex", ticker=ticker).set(
+                    gex_signal.score
+                )
             except Exception:
                 self._log.warning("gex_failed", ticker=ticker)
 

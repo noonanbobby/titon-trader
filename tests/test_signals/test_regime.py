@@ -545,22 +545,26 @@ class TestCalculateRegimeConfidence:
 class TestMapStatesToRegimes:
     """Tests for _map_states_to_regimes using a mock HMM model."""
 
-    def test_highest_vix_negative_return_maps_to_crisis(self) -> None:
-        """State with highest VIX and negative return -> crisis."""
+    def test_highest_vol_maps_to_high_vol_trend(self) -> None:
+        """State with highest realized vol -> high_vol_trend (never crisis).
+
+        Crisis is exclusively the VIX > 35 hard override in predict(),
+        never an HMM state mapping.
+        """
         detector = RegimeDetector(n_states=3)
         mock_model = MagicMock()
         # State 0: low vol, positive return, low vix
         # State 1: medium vol, near-zero return, medium vix
-        # State 2: high vol, negative return, high vix (crisis)
+        # State 2: high vol, negative return, high vix
         mock_model.means_ = np.array(
             [
                 [0.10, 0.10, 14.0],  # state 0: low vol trend
                 [0.01, 0.18, 20.0],  # state 1: range bound
-                [-0.15, 0.35, 30.0],  # state 2: crisis
+                [-0.15, 0.35, 30.0],  # state 2: high vol trend
             ]
         )
         mapping = detector._map_states_to_regimes(mock_model)
-        assert mapping[2] == REGIME_CRISIS
+        assert mapping[2] == REGIME_HIGH_VOL_TREND
 
     def test_lowest_vol_positive_return_maps_to_low_vol_trend(self) -> None:
         """State with lowest vol and positive return -> low_vol_trend."""
@@ -606,6 +610,40 @@ class TestMapStatesToRegimes:
         mapping = detector._map_states_to_regimes(mock_model)
         for regime in mapping.values():
             assert regime in ALL_REGIMES
+
+    def test_hmm_states_never_map_to_crisis(self) -> None:
+        """Crisis is exclusively the VIX > 35 override, never an HMM state."""
+        detector = RegimeDetector(n_states=3)
+        mock_model = MagicMock()
+        # Even with extreme values, HMM states should never map to crisis
+        mock_model.means_ = np.array(
+            [
+                [0.10, 0.08, 12.0],
+                [-0.20, 0.40, 34.0],  # Very high vol/VIX but still not crisis
+                [0.00, 0.20, 22.0],
+            ]
+        )
+        mapping = detector._map_states_to_regimes(mock_model)
+        for regime in mapping.values():
+            assert regime != REGIME_CRISIS, (
+                "HMM state mapping should never produce crisis regime"
+            )
+
+    def test_3_state_mapping_sorted_by_vol(self) -> None:
+        """3-state HMM maps to low_vol/range_bound/high_vol by realized vol."""
+        detector = RegimeDetector(n_states=3)
+        mock_model = MagicMock()
+        mock_model.means_ = np.array(
+            [
+                [0.05, 0.25, 22.0],  # state 0: highest vol
+                [-0.01, 0.12, 16.0],  # state 1: middle vol
+                [0.08, 0.08, 13.0],  # state 2: lowest vol
+            ]
+        )
+        mapping = detector._map_states_to_regimes(mock_model)
+        assert mapping[2] == REGIME_LOW_VOL_TREND  # lowest vol
+        assert mapping[1] == REGIME_RANGE_BOUND  # middle vol
+        assert mapping[0] == REGIME_HIGH_VOL_TREND  # highest vol
 
 
 # ======================================================================
