@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from src.risk.event_calendar import EventCalendar
     from src.risk.manager import RiskManager
     from src.signals.cross_asset import CrossAssetSignalGenerator
-    from src.signals.ensemble import EnsembleSignalGenerator
+    from src.signals.ensemble import EnsembleSignalGenerator, MLEnsemblePredictor
     from src.signals.gex import GammaExposureCalculator
     from src.signals.insider import InsiderSignalGenerator
     from src.signals.options_flow import OptionsFlowAnalyzer
@@ -133,6 +133,7 @@ class TitanApplication:
         self._vrp_calculator: VRPCalculator | None = None
         self._cross_asset: CrossAssetSignalGenerator | None = None
         self._ensemble: EnsembleSignalGenerator | None = None
+        self._ml_ensemble: MLEnsemblePredictor | None = None
 
         # Strategy engine
         self._strategy_selector: StrategySelector | None = None
@@ -784,6 +785,24 @@ class TitanApplication:
                 )
         except Exception:
             self._log.exception("ensemble_init_failed")
+
+        # ML Ensemble (3-model: XGBoost + LightGBM + CatBoost)
+        try:
+            from src.signals.ensemble import MLEnsemblePredictor
+
+            models_dir = str(self._settings.models_dir)
+            self._ml_ensemble = MLEnsemblePredictor(
+                model_dir=models_dir,
+                confidence_threshold=self._settings.trading.confidence_threshold,
+            )
+            self._log.info(
+                "ml_ensemble_initialized",
+                model_version=self._ml_ensemble.model_version,
+                n_models=self._ml_ensemble.n_models_loaded,
+                n_features=len(self._ml_ensemble.feature_names),
+            )
+        except Exception:
+            self._log.exception("ml_ensemble_init_failed")
 
     # ------------------------------------------------------------------
     # Strategy selector
@@ -2200,8 +2219,10 @@ class TitanApplication:
         # Each coroutine is wrapped so failures are isolated — a single
         # generator going down does not block the rest of the pipeline.
         signal_inputs_kwargs: dict[str, Any] = {}
+        ml_features_df: Any = None  # captured from _safe_technical for ML ensemble
 
         async def _safe_technical() -> None:
+            nonlocal ml_features_df
             if self._technical_generator is None or self._market_data is None:
                 return
             try:
@@ -2214,6 +2235,7 @@ class TitanApplication:
                 if bars is not None and not bars.empty:
                     features_df = self._technical_generator.calculate_features(bars)
                     if not features_df.empty:
+                        ml_features_df = features_df
                         last_row = features_df.iloc[-1]
                         tech_features: dict[str, float] = {}
                         for col in features_df.columns:
@@ -2386,6 +2408,27 @@ class TitanApplication:
             return_exceptions=True,
         )
 
+        # ----- 3b. ML Ensemble prediction (3-model: XGB+LGB+CatBoost) -----
+        ml_confidence: float = 0.0
+        if self._ml_ensemble is not None and ml_features_df is not None:
+            try:
+                last_features = ml_features_df.iloc[[-1]]
+                # Augment with available macro/cross-asset signals
+                for key, val in signal_inputs_kwargs.items():
+                    in_cols = key in last_features.columns
+                    if isinstance(val, (int, float)) and not in_cols:
+                        last_features[key] = val
+                ml_confidence = self._ml_ensemble.predict(last_features)
+                signal_inputs_kwargs["ml_confidence"] = ml_confidence
+                self._log.info(
+                    "ml_ensemble_scored",
+                    ticker=ticker,
+                    ml_confidence=round(ml_confidence, 4),
+                    n_features_available=len(last_features.columns),
+                )
+            except Exception:
+                self._log.warning("ml_ensemble_predict_failed", ticker=ticker)
+
         # ----- 4. Regime detection (needed for strategy selection) -----
         # The HMM model is fitted once at startup on SPY+VIX.  Here we only
         # call predict() using recent price data and the scan-level VIX cache.
@@ -2511,6 +2554,7 @@ class TitanApplication:
             "ensemble_scored",
             ticker=ticker,
             confidence=round(ensemble_result.confidence, 4),
+            ml_confidence=round(ml_confidence, 4),
             should_trade=ensemble_result.should_trade,
             direction=ensemble_result.direction_bias,
         )
@@ -2534,6 +2578,7 @@ class TitanApplication:
                         "raw_score": ensemble_result.raw_score,
                         "direction_bias": ensemble_result.direction_bias,
                         "contributions": ensemble_result.signal_contributions,
+                        "ml_ensemble_confidence": ml_confidence,
                     },
                     "regime": regime,
                     "iv_rank": iv_rank,
